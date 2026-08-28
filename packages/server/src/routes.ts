@@ -22,6 +22,8 @@ import { templates, composeDraft, suggestTemplate, saveDraft, draftsFor } from '
 import { parseCsv, guessMapping, preview as previewImport, commitImport, IMPORT_FIELDS, FIELD_LABELS,
   type ImportField } from './core/csv.ts';
 import { createBackup, listBackups, testRestore, pruneBackups } from './core/backup.ts';
+import { listAutomations, runAutomation, runScheduled, recentRuns, runsFor, disableAll,
+  TRIGGERS, type Automation } from './core/automations.ts';
 import { ingest } from './ingest/pipeline.ts';
 
 export const router = new Router();
@@ -745,6 +747,73 @@ router.post('/api/v1/backups/:file/test-restore', async (c) => {
   logAccess(c.user!.id, 'backup_restore_test', undefined, undefined,
     `${c.params.file} -> ${result.ok ? 'ok' : 'FAILED'}`);
   return result;
+});
+
+
+// --------------------------------------------------------- automations
+
+router.get('/api/v1/automations', (c) => {
+  c.require('audit:read');
+  return { automations: listAutomations(), triggers: TRIGGERS, runs: recentRuns(50) };
+});
+
+router.get('/api/v1/automations/:id/runs', (c) => {
+  c.require('audit:read');
+  return { runs: runsFor(c.params.id!, intParam(c.query.get('limit'), 50)) };
+});
+
+router.patch('/api/v1/automations/:id', (c) => {
+  c.require('settings:write');
+  const id = c.params.id!;
+  const before = plain(one<Record<string, unknown>>('SELECT * FROM automations WHERE id = ?', id));
+  if (!before) throw notFound('No such automation');
+  const b = requireBody<{ enabled?: boolean; test_mode?: boolean; max_per_run?: number }>(c);
+
+  const sets: string[] = [];
+  const params: (string | number)[] = [];
+  if (b.enabled !== undefined) { sets.push('enabled = ?'); params.push(b.enabled ? 1 : 0); }
+  if (b.test_mode !== undefined) { sets.push('test_mode = ?'); params.push(b.test_mode ? 1 : 0); }
+  if (b.max_per_run !== undefined) {
+    sets.push('max_per_run = ?'); params.push(Math.max(1, Math.min(500, Math.trunc(b.max_per_run))));
+  }
+  if (!sets.length) throw badRequest('Nothing to update');
+
+  run(`UPDATE automations SET ${sets.join(', ')}, updated_at = ? WHERE id = ?`, ...params, nowIso(), id);
+  const after = plain(one<Record<string, unknown>>('SELECT * FROM automations WHERE id = ?', id))!;
+  recordEvent({
+    entityType: 'automation', entityId: id, type: 'updated', actor: actorOf(c),
+    summary: `Automation "${String(after.name)}" ${after.enabled ? 'enabled' : 'disabled'}` +
+      (after.test_mode ? ' (test mode)' : ''),
+    before, after,
+  });
+  return after;
+});
+
+/** Runs one rule now. Respects its own test mode. */
+router.post('/api/v1/automations/:id/run', (c) => {
+  c.require('settings:write');
+  const row = one<{ id: string }>('SELECT id FROM automations WHERE id = ?', c.params.id!);
+  if (!row) throw notFound('No such automation');
+  const all = listAutomations();
+  const a = all.find((x) => x.id === c.params.id) as Automation;
+  const summary = runAutomation(a, actorOf(c));
+  logAccess(c.user!.id, 'automation_run', 'automation', a.id, JSON.stringify(summary));
+  return summary;
+});
+
+router.post('/api/v1/automations/run-all', (c) => {
+  c.require('settings:write');
+  const results = runScheduled(actorOf(c));
+  logAccess(c.user!.id, 'automation_run_all', undefined, undefined, `${results.length} rule(s)`);
+  return { results };
+});
+
+/** The kill switch. (spec 186) */
+router.post('/api/v1/automations/disable-all', (c) => {
+  c.require('settings:write');
+  const n = disableAll(actorOf(c));
+  logAccess(c.user!.id, 'automation_kill_switch', undefined, undefined, `${n} disabled`);
+  return { disabled: n };
 });
 
 // ------------------------------------------------------------------ health

@@ -10,6 +10,7 @@ import { config, REPO_ROOT } from './core/config.ts';
 import { migrateUp, applied, loadMigrations } from './db/migrate.ts';
 import { seedTemplates } from './core/drafts.ts';
 import { startBackupSchedule, newestBackup } from './core/backup.ts';
+import { seedAutomations, startAutomationSchedule } from './core/automations.ts';
 import { handle, securityHeaders } from './http.ts';
 import { router } from './routes.ts';
 
@@ -114,12 +115,17 @@ migrateUp();
 // Message templates are reference data, not demo data, so they are seeded in
 // production too. seedTemplates() only inserts what is missing.
 const newTemplates = seedTemplates();
+const newAutomations = seedAutomations();
+if (newAutomations) console.log(`[crm] seeded ${newAutomations} automation(s)`);
 if (newTemplates) console.log(`[crm] seeded ${newTemplates} message template(s)`);
 bootHealthCheck();
 
 // Daily, keeping two weeks. Verified on the way out; an unverified backup is
 // a guess.
 startBackupSchedule(24, 14);
+
+// Hourly sweep for the time-based rules. Event-driven ones fire inline.
+startAutomationSchedule(60);
 
 server.listen(config.port, config.host, () => {
   console.log(`[crm] Tiny Stars Command Center  ->  http://${config.host}:${config.port}`);

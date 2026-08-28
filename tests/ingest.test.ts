@@ -38,6 +38,8 @@ const { parseCsv, guessMapping, preview: previewImport, commitImport } =
 const { splitName } = await import('../packages/server/src/core/util.ts');
 const { createBackup, listBackups, testRestore, pruneBackups } =
   await import('../packages/server/src/core/backup.ts');
+const { seedAutomations, listAutomations, runAutomation, runsFor, disableAll } =
+  await import('../packages/server/src/core/automations.ts');
 
 before(async () => {
   await connect();
@@ -723,6 +725,111 @@ describe('backups', () => {
     assert.ok(all.length > 0);
     assert.ok(all[0]!.ageHours >= 0 && all[0]!.ageHours < 1, 'a fresh backup is not hours old');
     assert.match(all[0]!.file, /^crm-.*\.db$/);
+  });
+});
+
+
+// ------------------------------------------------------------ automations
+
+describe('automation engine', () => {
+  test('seeds the rules that used to be buried in the pipeline', () => {
+    seedAutomations();
+    const all = listAutomations();
+    assert.ok(all.length >= 4, 'the built-in rules exist');
+    for (const a of all) {
+      assert.ok(a.name.length > 3, 'every rule has a readable name');
+      assert.ok(Array.isArray(a.actions) && a.actions.length > 0, a.name + ' does something');
+      assert.ok(a.max_per_run > 0, a.name + ' has a cap');
+    }
+  });
+
+  test('fires on a stalled lead and records WHY it fired', () => {
+    seedAutomations();
+    const env = validateEnvelope(envelope('registration.created', registration({
+      guardian: { fullName: 'Silent Family', email: 'silent.auto@example.invalid', phone: '416-555-0990' },
+      child: { firstName: 'Quiet', ageBand: '3-5 years' },
+    })));
+    assert.equal(env.ok, true); if (!env.ok) return;
+    const r = asFamily(ingest(env.value));
+
+    // Age the lead past the five-day threshold and clear the task the pipeline
+    // already made, so the rule is the only thing that could act.
+    const old = new Date(Date.now() - 10 * 864e5).toISOString();
+    execSql('UPDATE leads SET last_contact_at = ?, created_at = ? WHERE id = ?', old, old, r.leadId!);
+    execSql("UPDATE tasks SET status = 'done' WHERE related_id IN (?, ?)", r.familyId, r.registrationId!);
+
+    const rule = listAutomations().find((a) => a.id === 'auto_stalled_lead')!;
+    const summary = runAutomation(rule);
+    assert.ok(summary.acted >= 1, 'the rule should act on a lead untouched for ten days');
+
+    const runs = runsFor('auto_stalled_lead', 50);
+    const acted = runs.filter((x) => x.outcome === 'acted');
+    assert.ok(acted.length >= 1);
+    assert.ok(String(acted[0]!.reason).length > 5, 'the run says why in plain English');
+
+    const created = one<{ n: number }>(
+      "SELECT COUNT(*) n FROM tasks WHERE related_id = ? AND source = 'automation'", r.leadId!);
+    assert.ok(Number(created?.n ?? 0) >= 1, 'a task was actually created');
+  });
+
+  test('records the runs that did NOTHING, and why', () => {
+    // "Why didn't it fire?" is the question people actually ask, and it is
+    // unanswerable if only successes are logged.
+    seedAutomations();
+    const env = validateEnvelope(envelope('registration.created', registration({
+      guardian: { fullName: 'Fresh Lead', email: 'fresh.auto@example.invalid', phone: '416-555-0991' },
+      child: { firstName: 'New', ageBand: '3-5 years' },
+    })));
+    assert.equal(env.ok, true); if (!env.ok) return;
+    ingest(env.value);
+
+    const rule = listAutomations().find((a) => a.id === 'auto_stalled_lead')!;
+    runAutomation(rule);
+
+    const skipped = runsFor('auto_stalled_lead', 100).filter((x) => x.outcome === 'skipped');
+    assert.ok(skipped.length >= 1, 'a fresh lead produces a skipped run, not silence');
+    assert.match(String(skipped[0]!.reason), /only \d+h since|already an open task/,
+      'the skip reason is specific, not "conditions not met"');
+  });
+
+  test('test mode runs everything and writes nothing', () => {
+    seedAutomations();
+    const env = validateEnvelope(envelope('registration.created', registration({
+      guardian: { fullName: 'Dry Run', email: 'dryrun.auto@example.invalid', phone: '416-555-0992' },
+      child: { firstName: 'Test', ageBand: '3-5 years' },
+    })));
+    assert.equal(env.ok, true); if (!env.ok) return;
+    const r = asFamily(ingest(env.value));
+    const old = new Date(Date.now() - 10 * 864e5).toISOString();
+    execSql('UPDATE leads SET last_contact_at = ?, created_at = ? WHERE id = ?', old, old, r.leadId!);
+    execSql("UPDATE tasks SET status = 'done' WHERE related_id IN (?, ?)", r.familyId, r.registrationId!);
+
+    const tasksBefore = countRows("SELECT COUNT(*) n FROM tasks WHERE source = 'automation'");
+    const rule = { ...listAutomations().find((a) => a.id === 'auto_stalled_lead')!, test_mode: 1 };
+    runAutomation(rule);
+    const tasksAfter = countRows("SELECT COUNT(*) n FROM tasks WHERE source = 'automation'");
+
+    assert.equal(tasksAfter, tasksBefore, 'test mode must not create anything');
+    const testRuns = runsFor(rule.id, 100).filter((x) => x.outcome === 'test');
+    assert.ok(testRuns.length >= 1, 'but it still records what it would have done');
+    assert.match(String(testRuns[0]!.reason), /Would have run/);
+  });
+
+  test('a rule cannot stampede: max_per_run is a hard cap', () => {
+    seedAutomations();
+    const rule = { ...listAutomations().find((a) => a.id === 'auto_stalled_lead')!, max_per_run: 1 };
+    const summary = runAutomation(rule);
+    assert.ok(summary.acted + summary.skipped + summary.failed <= 1,
+      'one bad import must not generate a thousand tasks');
+  });
+
+  test('the kill switch stops everything at once', () => {
+    seedAutomations();
+    const n = disableAll();
+    assert.ok(n >= 1, 'it disabled the rules that were running');
+    assert.equal(listAutomations().filter((a) => a.enabled).length, 0, 'nothing is left enabled');
+    // Put them back for any later test.
+    execSql('UPDATE automations SET enabled = 1 WHERE built_in = 1');
   });
 });
 
