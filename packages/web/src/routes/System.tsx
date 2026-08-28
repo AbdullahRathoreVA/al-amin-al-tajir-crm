@@ -133,15 +133,23 @@ export function System() {
 
       <Panel title="Not built yet">
         {/* Stating what does not exist is more useful than a screen of greyed
-            out buttons that imply it nearly does. (spec 218) */}
+            out buttons that imply it nearly does. Keep this honest: an item
+            stays here until it actually works. (spec 218) */}
         <ul className="flex flex-col gap-1.5 text-[13px]" style={{ color: 'var(--text-muted)' }}>
-          <li>Google Sheets two-way sync &mdash; Phase 3. The outbound queue above already records what would be sent.</li>
-          <li>Excel import wizard &mdash; Phase 3.</li>
-          <li>Local AI assistant and natural-language search &mdash; Phase 4.</li>
-          <li>Attendance, classrooms, documents, incidents &mdash; Phase 6.</li>
-          <li>Email, calendar and billing &mdash; Phase 7.</li>
-          <li>Voice agents &mdash; Phase 10. The event contract accepts their shape already; nothing emits it.</li>
+          <li>Google Sheets two-way sync. The outbound queue above already records what would be sent.</li>
+          <li>Sending email or SMS to a parent. The CRM drafts; a person sends.</li>
+          <li>Attendance, classrooms, documents, incidents, staff.</li>
+          <li>Billing and payments.</li>
+          <li>
+            Posting to Facebook or Instagram. This is not a code gap: it needs Meta Business
+            verification and App Review, which is an approval process rather than a build.
+          </li>
+          <li>Voice agents. The event contract accepts their shape already; nothing emits it.</li>
         </ul>
+        <p className="mt-3 text-[11px]" style={{ color: 'var(--text-faint)' }}>
+          Spreadsheet import, message drafting, registration completeness, automations, backups and
+          the AI layer are built and in use. AI is off unless a provider is configured.
+        </p>
       </Panel>
     </div>
   );
