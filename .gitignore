@@ -14,3 +14,4 @@ Thumbs.db
 *.db-shm
 .vite/
 coverage/
+deploy-secrets.local.txt

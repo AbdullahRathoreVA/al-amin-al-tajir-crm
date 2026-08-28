@@ -11,7 +11,7 @@
     "packages/*"
   ],
   "scripts": {
-    "dev": "node scripts/dev.mjs",
+    "dev": "npm run dev:web",
     "dev:server": "node --disable-warning=ExperimentalWarning --watch packages/server/src/main.ts",
     "dev:web": "npm run dev -w @crm/web",
     "build": "npm run build -w @crm/web",
@@ -19,7 +19,6 @@
     "db:migrate": "node --disable-warning=ExperimentalWarning packages/server/src/db/migrate.ts",
     "db:seed": "node --disable-warning=ExperimentalWarning packages/server/src/seed/demo.ts",
     "db:reset": "node --disable-warning=ExperimentalWarning packages/server/src/seed/reset.ts",
-    "emit:contract": "node --disable-warning=ExperimentalWarning packages/shared/src/emit.ts",
     "test": "node --disable-warning=ExperimentalWarning --test tests/*.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "scan:secrets": "node scripts/scan-secrets.mjs",
@@ -29,7 +28,9 @@
     "user:suspend": "node --disable-warning=ExperimentalWarning packages/server/src/seed/users.ts suspend",
     "user:activate": "node --disable-warning=ExperimentalWarning packages/server/src/seed/users.ts activate",
     "prod:check": "node --disable-warning=ExperimentalWarning packages/server/src/seed/production.ts check",
-    "prod:harden": "node --disable-warning=ExperimentalWarning packages/server/src/seed/production.ts harden"
+    "prod:harden": "node --disable-warning=ExperimentalWarning packages/server/src/seed/production.ts harden",
+    "deploy": "node scripts/deploy-fly.mjs",
+    "tunnel": "node scripts/tunnel.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.13.3",
