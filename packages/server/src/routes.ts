@@ -19,6 +19,8 @@ import { validateEnvelope } from '../../shared/src/contract.ts';
 import { analyticsBundle, isWindow, type Window } from './core/analytics.ts';
 import { assessRegistration, assessFamilyRegistration, incompleteRegistrations } from './core/completeness.ts';
 import { templates, composeDraft, suggestTemplate, saveDraft, draftsFor } from './core/drafts.ts';
+import { parseCsv, guessMapping, preview as previewImport, commitImport, IMPORT_FIELDS, FIELD_LABELS,
+  type ImportField } from './core/csv.ts';
 import { ingest } from './ingest/pipeline.ts';
 
 export const router = new Router();
@@ -630,6 +632,89 @@ router.post('/api/v1/families/:id/draft', (c) => {
 
   const id = saveDraft(familyId, draft, actorOf(c), status);
   return { id, status };
+});
+
+
+// ------------------------------------------------------------- import
+
+/**
+ * Three steps on purpose: parse, then preview, then commit. Nothing is written
+ * until a person has seen the counts and the sample rows. (spec 45 / 47)
+ */
+router.post('/api/v1/import/parse', (c) => {
+  c.require('family:write');
+  const b = requireBody<{ csv?: string }>(c);
+  if (typeof b.csv !== 'string' || !b.csv.trim()) throw badRequest('Send the file contents as { csv: "..." }');
+  if (b.csv.length > 5_000_000) throw badRequest('That file is larger than 5 MB.');
+
+  const parsed = parseCsv(b.csv);
+  if (!parsed.headers.length) throw badRequest('No header row found. The first line must name the columns.');
+
+  return {
+    headers: parsed.headers,
+    rowCount: parsed.rows.length,
+    truncated: parsed.truncated,
+    mapping: guessMapping(parsed.headers),
+    fields: IMPORT_FIELDS.map((f) => ({ id: f, label: FIELD_LABELS[f] })),
+    // A few raw rows so a person can see the mapping is pointing at the right
+    // columns before anything is validated.
+    sampleRows: parsed.rows.slice(0, 5),
+  };
+});
+
+router.post('/api/v1/import/preview', (c) => {
+  c.require('family:write');
+  const b = requireBody<{ csv?: string; mapping?: Record<string, number> }>(c);
+  if (typeof b.csv !== 'string') throw badRequest('csv is required');
+  const parsed = parseCsv(b.csv);
+  return previewImport(parsed, (b.mapping ?? {}) as Partial<Record<ImportField, number>>);
+});
+
+router.post('/api/v1/import/commit', (c) => {
+  c.require('family:write');
+  const b = requireBody<{ csv?: string; mapping?: Record<string, number>; source?: string }>(c);
+  if (typeof b.csv !== 'string') throw badRequest('csv is required');
+  const parsed = parseCsv(b.csv);
+  const result = commitImport(
+    parsed,
+    (b.mapping ?? {}) as Partial<Record<ImportField, number>>,
+    actorOf(c),
+    (b.source ?? 'a spreadsheet').slice(0, 80),
+  );
+  logAccess(c.user!.id, 'import', 'family', undefined,
+    `batch ${result.batchId} created=${result.created} updated=${result.updated}`);
+  return result;
+});
+
+// ------------------------------------------------------------- export
+
+/** CSV out. Its own capability: seeing families is not the same permission as
+ *  walking out with all of them. (spec 165) */
+router.get('/api/v1/export/families', (c) => {
+  c.require('data:export');
+  const rows = many<Record<string, string | number | null>>(
+    `SELECT f.name AS family, f.status, f.source,
+            g.first_name AS guardian_first, g.last_name AS guardian_last,
+            g.email AS guardian_email, g.phone AS guardian_phone, g.relationship,
+            ch.first_name AS child_first, ch.last_name AS child_last, ch.age_band,
+            f.created_at
+       FROM families f
+       LEFT JOIN guardians g ON g.family_id = f.id AND g.is_primary = 1
+       LEFT JOIN children ch ON ch.family_id = f.id
+      ORDER BY f.created_at DESC`);
+
+  logAccess(c.user!.id, 'export', 'family', undefined, `${rows.length} rows`);
+
+  const headers = rows.length ? Object.keys(rows[0]!) : [];
+  // A leading =, +, - or @ makes Excel treat a cell as a formula. Prefix with a
+  // quote so an imported name can never execute in someone's spreadsheet.
+  const esc = (v: unknown): string => {
+    let sv = v === null || v === undefined ? '' : String(v);
+    if (/^[=+\-@\t\r]/.test(sv)) sv = "'" + sv;
+    return '"' + sv.replace(/"/g, '""') + '"';
+  };
+  const csv = [headers.join(','), ...rows.map((r) => headers.map((h) => esc(r[h])).join(','))].join('\n');
+  return { filename: `tiny-stars-families-${new Date().toISOString().slice(0, 10)}.csv`, csv, rows: rows.length };
 });
 
 // ------------------------------------------------------------------ health

@@ -8,6 +8,7 @@ import { Families, Leads, Tours, Registrations, Tasks } from './routes/Lists.tsx
 import { FamilyDetail, RegistrationDetail } from './routes/Details.tsx';
 import { System } from './routes/System.tsx';
 import { Analytics } from './routes/Analytics.tsx';
+import { Import } from './routes/Import.tsx';
 
 const NAV = [
   { to: '/', label: 'Dashboard', glyph: '◇' },
@@ -17,6 +18,7 @@ const NAV = [
   { to: '/registrations', label: 'Registrations', glyph: '≡' },
   { to: '/tasks', label: 'Tasks', glyph: '✓' },
   { to: '/analytics', label: 'Analytics', glyph: '◔' },
+  { to: '/import', label: 'Import', glyph: '⤓' },
   { to: '/system', label: 'System', glyph: '⚙' },
 ];
 
@@ -245,6 +247,7 @@ function Routes({ userName }: { userName: string }) {
   if (path.startsWith('/registrations/')) return <RegistrationDetail />;
   if (path === '/tasks') return <Tasks />;
   if (path === '/analytics') return <Analytics />;
+  if (path === '/import') return <Import />;
   if (path === '/system' || path === '/programs') return <System />;
   return (
     <Panel><div className="py-8 text-center">

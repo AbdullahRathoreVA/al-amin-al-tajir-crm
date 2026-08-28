@@ -33,6 +33,9 @@ const { checkLoginAllowed, recordLoginFailure, recordLoginSuccess, resetLoginLim
 const { assessRegistration } = await import('../packages/server/src/core/completeness.ts');
 const { seedTemplates, composeDraft, suggestTemplate, saveDraft } =
   await import('../packages/server/src/core/drafts.ts');
+const { parseCsv, guessMapping, preview: previewImport, commitImport } =
+  await import('../packages/server/src/core/csv.ts');
+const { splitName } = await import('../packages/server/src/core/util.ts');
 
 before(async () => {
   await connect();
@@ -484,6 +487,183 @@ describe('message drafts', () => {
     const after = one<{ last_contact_at: string | null }>(
       'SELECT last_contact_at FROM leads WHERE id = ?', r.leadId!);
     assert.ok(after?.last_contact_at, 'sending must reset the follow-up clock');
+  });
+});
+
+
+// -------------------------------------------------------------- csv import
+
+describe('csv parsing', () => {
+  test('handles what Excel actually produces', () => {
+    // BOM, quoted commas, doubled quotes, an embedded newline, CRLF, a blank
+    // line. Every one of these has silently corrupted somebody's import.
+    const csv = '\uFEFFname,note,email\r\n'
+      + '"Smith, Jane","She said ""soon""",jane@example.invalid\r\n'
+      + '\r\n'
+      + '"Two\nLines",plain,two@example.invalid\r\n';
+    const p = parseCsv(csv);
+
+    assert.deepEqual(p.headers, ['name', 'note', 'email'], 'the BOM must not stick to the first header');
+    assert.equal(p.rows.length, 2, 'the blank line is skipped');
+    assert.equal(p.rows[0]![0], 'Smith, Jane', 'a quoted comma is one field');
+    assert.equal(p.rows[0]![1], 'She said "soon"', 'doubled quotes become one');
+    assert.equal(p.rows[1]![0], 'Two\nLines', 'an embedded newline survives');
+  });
+
+  test('guesses columns from the header names spreadsheets really use', () => {
+    const p = parseCsv('Parent Name,E-Mail,Mobile,Child\'s Name,DOB\nA,b@c.invalid,416-555-0100,Kid,2022-01-05\n');
+    const m = guessMapping(p.headers);
+    assert.equal(m.guardianName, 0);
+    assert.equal(m.guardianEmail, 1);
+    assert.equal(m.guardianPhone, 2);
+    assert.equal(m.childFirstName, 3);
+    assert.equal(m.childDob, 4);
+  });
+
+  test('never maps two fields to the same column', () => {
+    const p = parseCsv('name,email\nA,b@c.invalid\n');
+    const m = guessMapping(p.headers);
+    const used = Object.values(m);
+    assert.equal(new Set(used).size, used.length, 'each column is claimed once');
+  });
+});
+
+describe('csv import', () => {
+  const HEAD = 'Parent Name,Email,Phone,Child Name,DOB\n';
+
+  test('previews without writing anything', () => {
+    const before = countRows('SELECT COUNT(*) n FROM families');
+    const csv = HEAD + 'Nadia Farouk,nadia.imp@example.invalid,416-555-0700,Amir,2021-03-14\n';
+    const p = parseCsv(csv);
+    const view = previewImport(p, guessMapping(p.headers));
+
+    assert.equal(view.totalRows, 1);
+    assert.equal(view.willCreate, 1);
+    assert.equal(view.willSkip, 0);
+    assert.equal(countRows('SELECT COUNT(*) n FROM families'), before,
+      'previewing must not write a single row');
+  });
+
+  test('a row with no way to contact the family is skipped, with a reason', () => {
+    const csv = HEAD + 'No Contact Person,,,Kid,\n';
+    const p = parseCsv(csv);
+    const view = previewImport(p, guessMapping(p.headers));
+    assert.equal(view.willSkip, 1);
+    assert.ok(view.issues.some((i) => i.severity === 'error' && /never be contacted/.test(i.message)));
+  });
+
+  test('an ambiguous date is left blank rather than guessed', () => {
+    // 03/04/2022 is March 4th to an American and April 3rd to a Canadian. A
+    // wrong DOB puts a child in the wrong room and the wrong ratio.
+    const csv = HEAD + 'Ambiguous Date,amb@example.invalid,416-555-0701,Kid,03/04/2022\n';
+    const p = parseCsv(csv);
+    const view = previewImport(p, guessMapping(p.headers));
+    assert.ok(view.issues.some((i) => /day\/month or month\/day/.test(i.message)),
+      'the ambiguity must be surfaced, not resolved by coin flip');
+  });
+
+  test('an unambiguous date is read correctly', () => {
+    const csv = HEAD + 'Clear Date,clear@example.invalid,416-555-0702,Kid,25/12/2021\n';
+    const p = parseCsv(csv);
+    const result = commitImport(p, guessMapping(p.headers), { type: 'user', id: null }, 'test.csv');
+    assert.equal(result.created, 1);
+    const child = one<{ date_of_birth: string }>(
+      "SELECT date_of_birth FROM children WHERE first_name = 'Kid' AND date_of_birth IS NOT NULL ORDER BY created_at DESC LIMIT 1");
+    assert.equal(child?.date_of_birth, '2021-12-25', '25 can only be a day');
+  });
+
+  test('imports, and a second run of the same file updates rather than duplicates', () => {
+    const csv = HEAD + 'Rafael Duarte,rafael.imp@example.invalid,416-555-0703,Bruna,2020-06-01\n';
+    const p = parseCsv(csv);
+    const map = guessMapping(p.headers);
+
+    const first = commitImport(p, map, { type: 'user', id: null }, 'families.csv');
+    assert.equal(first.created, 1);
+    const afterFirst = countRows('SELECT COUNT(*) n FROM families');
+
+    const second = commitImport(parseCsv(csv), map, { type: 'user', id: null }, 'families.csv');
+    assert.equal(second.created, 0, 'the same email must not create a second family');
+    assert.equal(second.updated, 1);
+    assert.equal(countRows('SELECT COUNT(*) n FROM families'), afterFirst);
+
+    assert.equal(countRows(
+      "SELECT COUNT(*) n FROM children WHERE first_name = 'Bruna'"), 1,
+      'the child must not be duplicated either');
+  });
+
+  test('flags a duplicate inside the file itself', () => {
+    const csv = HEAD
+      + 'Same Person,dup.imp@example.invalid,416-555-0704,First,\n'
+      + 'Same Person,dup.imp@example.invalid,416-555-0704,Second,\n';
+    const p = parseCsv(csv);
+    const view = previewImport(p, guessMapping(p.headers));
+    assert.ok(view.issues.some((i) => /Same contact as row 2/.test(i.message)),
+      'a repeated contact within one file must be called out');
+  });
+
+
+  test('two rows sharing a contact become ONE family, as the preview promised', () => {
+    // Regression. resolveRows only sees the database, so both rows looked new
+    // and both created a family, while the preview said they would be merged.
+    // The commit contradicting its own preview is worse than either behaviour.
+    const email = 'batchdupe-' + randomUUID().slice(0, 8) + '@example.invalid';
+    const csv = 'Parent Name,Email,Phone,Child Name,DOB\n'
+      + 'Priya Sharma,' + email + ',780-555-0900,Arjun,2020-07-22\n'
+      + 'Priya Sharma,' + email + ',780-555-0900,Meera,2023-01-09\n';
+    const p = parseCsv(csv);
+    const view = previewImport(p, guessMapping(p.headers));
+    assert.equal(view.willCreate, 1, 'the preview must promise one family');
+
+    const result = commitImport(parseCsv(csv), guessMapping(p.headers),
+      { type: 'user', id: null }, 'siblings.csv');
+    assert.equal(result.created, 1, 'the commit must keep that promise');
+
+    const fams = many<{ id: string }>(
+      'SELECT DISTINCT family_id AS id FROM guardians WHERE email_norm = ?', email);
+    assert.equal(fams.length, 1, 'exactly one family for one email');
+    assert.equal(countRows('SELECT COUNT(*) n FROM children WHERE family_id = ?', fams[0]!.id), 2,
+      'both children land under it as siblings');
+  });
+
+  test('reads "Last, First" the way spreadsheets actually export names', () => {
+    // Regression: splitting on whitespace turned "Okafor, Ngozi" into
+    // first="Okafor," last="Ngozi", filing the family under the given name.
+    const csv = 'Parent Name,Email,Phone,Child Name,DOB\n'
+      + '"Okafor, Ngozi",ngozi-' + randomUUID().slice(0, 6) + '@example.invalid,780-555-0901,Chidi,2021-03-14\n';
+    const p = parseCsv(csv);
+    commitImport(p, guessMapping(p.headers), { type: 'user', id: null }, 'lastfirst.csv');
+
+    const fam = one<{ name: string }>(
+      "SELECT name FROM families WHERE source = 'excel' ORDER BY created_at DESC LIMIT 1");
+    assert.equal(fam?.name, 'Okafor family', 'the surname is the family name, not the given name');
+
+    const g = one<{ first_name: string; last_name: string }>(
+      "SELECT first_name, last_name FROM guardians ORDER BY created_at DESC LIMIT 1");
+    assert.equal(g?.first_name, 'Ngozi');
+    assert.equal(g?.last_name, 'Okafor');
+  });
+
+  test('a plain "First Last" name still works', () => {
+    assert.deepEqual(splitName('Ngozi Okafor'), { first: 'Ngozi', last: 'Okafor' });
+    assert.deepEqual(splitName('Okafor, Ngozi'), { first: 'Ngozi', last: 'Okafor' });
+    assert.deepEqual(splitName('Cher'), { first: 'Cher', last: null });
+    assert.deepEqual(splitName('Okafor,'), { first: 'Okafor', last: null });
+  });
+
+  test('every imported record says where it came from', () => {
+    const csv = HEAD + 'Traceable Person,trace.imp@example.invalid,416-555-0705,Tess,\n';
+    const p = parseCsv(csv);
+    const result = commitImport(p, guessMapping(p.headers), { type: 'user', id: null }, 'march-list.csv');
+
+    const fam = one<{ id: string; source: string }>(
+      `SELECT f.id, f.source FROM families f JOIN guardians g ON g.family_id = f.id
+        WHERE g.email_norm = 'trace.imp@example.invalid'`)!;
+    assert.equal(fam.source, 'excel');
+
+    const ev = one<{ summary: string }>(
+      "SELECT summary FROM events WHERE entity_id = ? AND type = 'created'", fam.id);
+    assert.match(ev!.summary, /march-list\.csv/, 'the file name is on the record');
+    assert.match(ev!.summary, new RegExp(result.batchId.slice(0, 8)), 'the batch id is on the record');
   });
 });
 

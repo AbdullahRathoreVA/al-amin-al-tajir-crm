@@ -32,8 +32,21 @@ export function normPhone(p?: string | null): string | null {
 }
 
 export function splitName(full: string): { first: string; last: string | null } {
-  const parts = full.trim().split(/\s+/).filter(Boolean);
-  if (parts.length === 0) return { first: 'Unknown', last: null };
+  const trimmed = full.trim();
+  if (!trimmed) return { first: 'Unknown', last: null };
+
+  // "Okafor, Ngozi" is how most spreadsheet exports write a name. Splitting on
+  // whitespace turns that into first="Okafor," last="Ngozi", and the family
+  // ends up filed under the child's given name. Comma wins over space.
+  const comma = trimmed.indexOf(',');
+  if (comma > 0) {
+    const last = trimmed.slice(0, comma).trim();
+    const first = trimmed.slice(comma + 1).trim();
+    if (last && first) return { first, last };
+    if (last) return { first: last, last: null };
+  }
+
+  const parts = trimmed.split(/\s+/).filter(Boolean);
   if (parts.length === 1) return { first: parts[0]!, last: null };
   return { first: parts[0]!, last: parts.slice(1).join(' ') };
 }
