@@ -55,6 +55,26 @@ authenticated by:
 
 CORS is granted only to `CRM_ALLOWED_ORIGIN`, and only on this route.
 
+## Sign-in throttling
+
+Failed sign-ins back off exponentially: five free attempts, then 2s doubling to
+a 15 minute cap, forgotten after an hour of quiet. A correct password clears the
+account.
+
+Two counters, and they behave differently on purpose:
+
+- **Per account** carries the escalating lock.
+- **Per address** only counts, and trips at a much higher sweep cap (50 failures
+  across any accounts).
+
+The address deliberately does NOT get the escalating lock. Every member of staff
+shares one office address, so applying it there meant one person fumbling their
+password locked out every colleague sitting next to them. Found by hammering the
+real endpoint, not by reading the code.
+
+ is trusted for throttling only, never for anything that grants
+access.
+
 ## Input handling
 
 - Bodies are capped at 1 MB; the registration route on the website caps at 32 KB.
@@ -96,9 +116,9 @@ Stated rather than glossed over:
 - **No encryption at rest.** The SQLite file is plaintext on disk. Use full-disk
   encryption (BitLocker, FileVault). SQLCipher would need a native module, which
   is the same trade-off deferred with Tauri.
-- **No rate limiting on the CRM's own endpoints** beyond the body cap. It is
-  loopback-bound today; this matters the moment it is exposed to a private
-  network.
+- **No rate limiting beyond login and the body cap.** Sign-in is throttled (see
+  below); the read endpoints are not. That matters the moment this is exposed
+  beyond loopback.
 - **The website's rate limit is best-effort.** A serverless function has no
   shared memory, so it only slows a burst landing on one warm instance. Real
   rate limiting belongs at the edge.

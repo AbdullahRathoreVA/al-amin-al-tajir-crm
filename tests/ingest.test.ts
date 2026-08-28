@@ -27,6 +27,8 @@ const { reindexAll, search } = await import('../packages/server/src/core/search.
 const { hashPassword, verifyPassword, can } = await import('../packages/server/src/core/auth.ts');
 const { verifySignature } = await import('../packages/server/src/http.ts');
 const { attention, dataHealth } = await import('../packages/server/src/core/queries.ts');
+const { checkLoginAllowed, recordLoginFailure, recordLoginSuccess, resetLoginLimits } =
+  await import('../packages/server/src/core/ratelimit.ts');
 
 before(async () => {
   await connect();
@@ -352,6 +354,54 @@ describe('security', () => {
     assert.equal(verifySignature(body + ' ', sig, secret), false, 'a changed body must invalidate the signature');
     assert.equal(verifySignature(body, sig, 'wrong-secret'), false);
     assert.equal(verifySignature(body, undefined, secret), false);
+  });
+
+  test('repeated wrong passwords lock the account out', () => {
+    resetLoginLimits();
+    const who = 'victim@example.invalid';
+    const from = '203.0.113.9';
+
+    // The first few are free: a person who mistypes must not be punished.
+    for (let i = 0; i < 5; i++) {
+      assert.equal(checkLoginAllowed(who, from).allowed, true, `attempt ${i + 1} should be allowed`);
+      recordLoginFailure(who, from);
+    }
+    recordLoginFailure(who, from);
+
+    const verdict = checkLoginAllowed(who, from);
+    assert.equal(verdict.allowed, false, 'the account must be locked after sustained failures');
+    assert.ok(verdict.retryAfterSeconds > 0, 'the caller is told how long to wait');
+  });
+
+  test('getting the password right eventually does not leave you locked out', () => {
+    resetLoginLimits();
+    const from = '203.0.113.10';
+    for (let i = 0; i < 6; i++) recordLoginFailure('a@example.invalid', from);
+    recordLoginSuccess('a@example.invalid', from);
+    assert.equal(checkLoginAllowed('a@example.invalid', from).allowed, true,
+      'a success must lift the lock on both the account and the address it came from');
+  });
+
+  test('one address cannot sweep many accounts', () => {
+    resetLoginLimits();
+    const from = '203.0.113.11';
+    for (let i = 0; i < 60; i++) recordLoginFailure(`user${i}@example.invalid`, from);
+    assert.equal(checkLoginAllowed('never-tried@example.invalid', from).allowed, false,
+      'the address is blocked even for an account it has not touched');
+  });
+
+  test('one colleague fumbling their password does not lock out the office', () => {
+    // Every staff member shares one office address. Caught by actually hammering
+    // the endpoint: the escalating lock used to apply to the address too, so one
+    // person mistyping locked out everyone sitting next to them.
+    resetLoginLimits();
+    const office = '203.0.113.12';
+    for (let i = 0; i < 8; i++) recordLoginFailure('butterfingers@example.invalid', office);
+
+    assert.equal(checkLoginAllowed('butterfingers@example.invalid', office).allowed, false,
+      'the account that failed is locked');
+    assert.equal(checkLoginAllowed('colleague@example.invalid', office).allowed, true,
+      'everyone else at the same address can still sign in');
   });
 
   test('roles cannot exceed their capabilities', () => {

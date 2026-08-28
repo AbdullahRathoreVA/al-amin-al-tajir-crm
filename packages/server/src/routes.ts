@@ -2,7 +2,8 @@
  * API v1. Versioned in the path so the website is not broken by CRM changes.
  * (spec 118 / 197)
  */
-import { Router, badRequest, notFound, forbidden, verifySignature, type Ctx } from './http.ts';
+import { Router, badRequest, notFound, forbidden, verifySignature, HttpError, type Ctx } from './http.ts';
+import { checkLoginAllowed, recordLoginFailure, recordLoginSuccess } from './core/ratelimit.ts';
 import { one, many, run, tx } from './db/index.ts';
 import { config } from './core/config.ts';
 import { newId, nowIso, plain, plainAll, safeJson } from './core/util.ts';
@@ -37,8 +38,28 @@ const intParam = (v: string | null, dflt: number, max = 200): number => {
 router.post('/api/v1/auth/login', (c) => {
   const b = requireBody<{ email?: string; password?: string }>(c);
   if (!b.email || !b.password) throw badRequest('Email and password are required');
+
+  // Behind a proxy the socket address is the proxy's. Trust the forwarded
+  // header only for throttling, never for anything that grants access.
+  const fwd = c.req.headers['x-forwarded-for'];
+  const address = (Array.isArray(fwd) ? fwd[0] : fwd)?.split(',')[0]?.trim()
+    || c.req.socket.remoteAddress || 'unknown';
+
+  const verdict = checkLoginAllowed(b.email, address);
+  if (!verdict.allowed) {
+    logAccess(null, 'login_throttled', undefined, undefined, b.email.slice(0, 60));
+    throw new HttpError(429,
+      `Too many sign-in attempts. Try again in ${verdict.retryAfterSeconds} seconds.`);
+  }
+
   const result = login(b.email, b.password, c.req.headers['user-agent']);
-  if (!result) throw badRequest('That email and password do not match');
+  if (!result) {
+    recordLoginFailure(b.email, address);
+    // Same message whether the account exists or the password was wrong.
+    throw badRequest('That email and password do not match');
+  }
+
+  recordLoginSuccess(b.email, address);
   c.setCookie('crm_session', result.token, { expires: result.expiresAt });
   logAccess(result.user.id, 'login');
   return { user: result.user, capabilities: capabilitiesFor(result.user.role) };
