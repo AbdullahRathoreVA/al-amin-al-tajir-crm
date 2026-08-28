@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Tiny Stars Command Center — private, local-first childcare operations system.",
+  "description": "Tiny Stars Command Center \u2014 private, local-first childcare operations system.",
   "engines": {
     "node": ">=22.5.0"
   },
@@ -30,7 +30,11 @@
     "prod:check": "node --disable-warning=ExperimentalWarning packages/server/src/seed/production.ts check",
     "prod:harden": "node --disable-warning=ExperimentalWarning packages/server/src/seed/production.ts harden",
     "deploy": "node scripts/deploy-fly.mjs",
-    "tunnel": "node scripts/tunnel.mjs"
+    "tunnel": "node scripts/tunnel.mjs",
+    "backup": "node --disable-warning=ExperimentalWarning packages/server/src/seed/backup-cli.ts create",
+    "backup:list": "node --disable-warning=ExperimentalWarning packages/server/src/seed/backup-cli.ts list",
+    "backup:test": "node --disable-warning=ExperimentalWarning packages/server/src/seed/backup-cli.ts test",
+    "backup:restore": "node --disable-warning=ExperimentalWarning packages/server/src/seed/backup-cli.ts restore"
   },
   "devDependencies": {
     "@types/node": "^24.13.3",

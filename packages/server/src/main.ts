@@ -9,6 +9,7 @@ import { connect, one } from './db/index.ts';
 import { config, REPO_ROOT } from './core/config.ts';
 import { migrateUp, applied, loadMigrations } from './db/migrate.ts';
 import { seedTemplates } from './core/drafts.ts';
+import { startBackupSchedule, newestBackup } from './core/backup.ts';
 import { handle, securityHeaders } from './http.ts';
 import { router } from './routes.ts';
 
@@ -53,8 +54,13 @@ function bootHealthCheck(): void {
     console.log('[crm] note: CRM_INGEST_SECRET is not set, so the website cannot post registrations yet.');
   }
   if (users === 0) {
-    console.log('[crm] no users yet. Run:  npm run db:seed');
+    console.log('[crm] no users yet. Create one:  npm run user:create');
   }
+
+  const backup = newestBackup();
+  if (!backup) console.log('[crm] backup   none yet, one will be taken shortly');
+  else if (backup.ageHours > 48) console.log(`[crm] backup   WARNING last one is ${backup.ageHours}h old`);
+  else console.log(`[crm] backup   ${backup.file} (${backup.ageHours}h ago)`);
 }
 
 const server = createServer(async (req, res) => {
@@ -110,6 +116,10 @@ migrateUp();
 const newTemplates = seedTemplates();
 if (newTemplates) console.log(`[crm] seeded ${newTemplates} message template(s)`);
 bootHealthCheck();
+
+// Daily, keeping two weeks. Verified on the way out; an unverified backup is
+// a guess.
+startBackupSchedule(24, 14);
 
 server.listen(config.port, config.host, () => {
   console.log(`[crm] Tiny Stars Command Center  ->  http://${config.host}:${config.port}`);

@@ -107,9 +107,7 @@ function Login({ onSignedIn }: { onSignedIn: () => void }) {
           {busy ? 'Signing in…' : 'Sign in'}
         </Button>
 
-        <p className="mt-4 border-t pt-3 text-center text-[11px]" style={{ borderColor: 'var(--line)', color: 'var(--text-faint)' }}>
-          Demo accounts: owner@demo.local, director@demo.local,<br />admissions@demo.local, educator@demo.local &mdash; password <code>demo1234</code>
-        </p>
+
       </form>
     </div>
   );

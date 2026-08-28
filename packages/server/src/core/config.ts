@@ -46,6 +46,9 @@ export const config = {
   sessionSecret: sessionSecret(),
   ingestSecret: env('CRM_INGEST_SECRET'),
   allowedOrigin: env('CRM_ALLOWED_ORIGIN'),
-  mode: (env('CRM_MODE', 'demo') === 'production' ? 'production' : 'demo') as 'demo' | 'production',
+  // Production is the default. This holds real families; demo mode is the
+  // exception you ask for, not the state you fall into by forgetting a
+  // variable.
+  mode: (env('CRM_MODE', 'production') === 'demo' ? 'demo' : 'production') as 'demo' | 'production',
   get isDemo() { return this.mode === 'demo'; },
 } as const;

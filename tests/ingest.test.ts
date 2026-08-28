@@ -36,6 +36,8 @@ const { seedTemplates, composeDraft, suggestTemplate, saveDraft } =
 const { parseCsv, guessMapping, preview: previewImport, commitImport } =
   await import('../packages/server/src/core/csv.ts');
 const { splitName } = await import('../packages/server/src/core/util.ts');
+const { createBackup, listBackups, testRestore, pruneBackups } =
+  await import('../packages/server/src/core/backup.ts');
 
 before(async () => {
   await connect();
@@ -664,6 +666,63 @@ describe('csv import', () => {
       "SELECT summary FROM events WHERE entity_id = ? AND type = 'created'", fam.id);
     assert.match(ev!.summary, /march-list\.csv/, 'the file name is on the record');
     assert.match(ev!.summary, new RegExp(result.batchId.slice(0, 8)), 'the batch id is on the record');
+  });
+});
+
+
+// ---------------------------------------------------------------- backups
+
+describe('backups', () => {
+  test('a backup opens, passes integrity, and holds the same rows', () => {
+    // The failure this guards against is a backup that exists as a file and is
+    // unopenable when it is finally needed. VACUUM INTO rather than copying is
+    // what makes that true; this asserts it.
+    const r = createBackup();
+    assert.ok(r.sizeBytes > 0, 'the file is not empty');
+    assert.equal(r.verify.integrity, 'ok');
+    assert.equal(r.verify.ok, true, r.verify.problems.join('; '));
+
+    for (const [table, n] of Object.entries(r.verify.counts)) {
+      assert.equal(n, r.verify.liveCounts[table],
+        table + ': backup has ' + n + ', live has ' + r.verify.liveCounts[table]);
+    }
+    assert.ok(r.verify.counts.families !== undefined, 'families are checked');
+    assert.ok(r.verify.counts.events !== undefined, 'the event log is checked');
+  });
+
+  test('a rehearsed restore opens the file as a separate database', async () => {
+    createBackup();
+    const newest = listBackups()[0]!;
+    const result = await testRestore(newest.file);
+    assert.equal(result.ok, true, result.problems.join('; '));
+    assert.equal(result.integrity, 'ok');
+    assert.ok(result.counts.families! >= 0);
+  });
+
+  test('rehearsing a restore of something that is not there fails loudly', async () => {
+    await assert.rejects(() => testRestore('crm-does-not-exist.db'), /No such backup/);
+  });
+
+  test('pruning keeps the newest and removes the rest', () => {
+    for (let i = 0; i < 3; i++) createBackup();
+    const before = listBackups().length;
+    assert.ok(before >= 3, 'several backups exist');
+
+    const removed = pruneBackups(2);
+    const after = listBackups();
+    assert.equal(after.length, 2, 'exactly the requested number is kept');
+    assert.equal(removed.length, before - 2);
+
+    // The survivors must be the NEWEST, not an arbitrary two.
+    assert.ok(after[0]!.takenAt >= after[1]!.takenAt, 'sorted newest first');
+  });
+
+  test('backups are listed newest first, with a real age', () => {
+    createBackup();
+    const all = listBackups();
+    assert.ok(all.length > 0);
+    assert.ok(all[0]!.ageHours >= 0 && all[0]!.ageHours < 1, 'a fresh backup is not hours old');
+    assert.match(all[0]!.file, /^crm-.*\.db$/);
   });
 });
 

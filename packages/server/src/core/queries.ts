@@ -7,6 +7,7 @@
  */
 import { one, many } from '../db/index.ts';
 import { dayBounds, nowIso, plainAll } from './util.ts';
+import { newestBackup } from './backup.ts';
 
 const count = (sql: string, ...p: (string | number | null)[]): number =>
   Number(one<{ n: number }>(sql, ...p)?.n ?? 0);
@@ -291,7 +292,14 @@ export function systemHealth(): SystemCheck[] {
   // green light for a thing that does not exist is a lie. (spec 137 / 218)
   checks.push({ id: 'google-sheets', label: 'Google Sheets', state: 'unknown', detail: 'Not connected (Phase 3)' });
   checks.push({ id: 'ai', label: 'AI assistant', state: 'unknown', detail: 'Not configured (Phase 4)' });
-  checks.push({ id: 'backup', label: 'Backup', state: 'unknown', detail: 'No backup has run yet' });
+  const backup = newestBackup();
+  checks.push({
+    id: 'backup', label: 'Backup',
+    state: !backup ? 'critical' : backup.ageHours > 48 ? 'warning' : 'good',
+    detail: !backup
+      ? 'No backup exists. Every family would be lost with the disk.'
+      : `${backup.file} taken ${backup.ageHours}h ago, ${Math.round(backup.sizeBytes / 1024)}kB`,
+  });
 
   return checks;
 }

@@ -21,6 +21,7 @@ import { assessRegistration, assessFamilyRegistration, incompleteRegistrations }
 import { templates, composeDraft, suggestTemplate, saveDraft, draftsFor } from './core/drafts.ts';
 import { parseCsv, guessMapping, preview as previewImport, commitImport, IMPORT_FIELDS, FIELD_LABELS,
   type ImportField } from './core/csv.ts';
+import { createBackup, listBackups, testRestore, pruneBackups } from './core/backup.ts';
 import { ingest } from './ingest/pipeline.ts';
 
 export const router = new Router();
@@ -715,6 +716,35 @@ router.get('/api/v1/export/families', (c) => {
   };
   const csv = [headers.join(','), ...rows.map((r) => headers.map((h) => esc(r[h])).join(','))].join('\n');
   return { filename: `tiny-stars-families-${new Date().toISOString().slice(0, 10)}.csv`, csv, rows: rows.length };
+});
+
+
+// ------------------------------------------------------------- backups
+
+router.get('/api/v1/backups', (c) => {
+  c.require('audit:read');
+  return { backups: listBackups() };
+});
+
+router.post('/api/v1/backups', (c) => {
+  c.require('settings:write');
+  const result = createBackup();
+  logAccess(c.user!.id, 'backup_created', undefined, undefined, result.path.split(/[\\/]/).pop());
+  return {
+    file: result.path.split(/[\\/]/).pop(),
+    sizeBytes: result.sizeBytes,
+    verified: result.verify.ok,
+    problems: result.verify.problems,
+  };
+});
+
+/** Rehearses a restore against a separate connection. Touches nothing live. */
+router.post('/api/v1/backups/:file/test-restore', async (c) => {
+  c.require('settings:write');
+  const result = await testRestore(c.params.file!);
+  logAccess(c.user!.id, 'backup_restore_test', undefined, undefined,
+    `${c.params.file} -> ${result.ok ? 'ok' : 'FAILED'}`);
+  return result;
 });
 
 // ------------------------------------------------------------------ health
