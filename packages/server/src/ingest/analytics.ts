@@ -11,7 +11,7 @@
  */
 import { one, run, tx } from '../db/index.ts';
 import { newId, nowIso } from '../core/util.ts';
-import type { AnalyticsBatch } from '@crm/shared';
+import type { AnalyticsBatch } from '../../../shared/src/contract.ts';
 
 export interface AnalyticsResult {
   kind: 'analytics';

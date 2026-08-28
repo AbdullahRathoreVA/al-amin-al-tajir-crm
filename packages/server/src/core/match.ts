@@ -12,7 +12,7 @@
  */
 import { many } from '../db/index.ts';
 import { normEmail, normPhone, splitName } from './util.ts';
-import type { GuardianInput, ChildInput } from '@crm/shared';
+import type { GuardianInput, ChildInput } from '../../../shared/src/contract.ts';
 
 export type MatchDecision = 'link' | 'review' | 'new';
 

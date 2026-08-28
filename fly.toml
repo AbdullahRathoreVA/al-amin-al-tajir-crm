@@ -1,0 +1,47 @@
+# Fly.io deployment for the Tiny Stars Command Center.
+#
+# Before the first deploy:
+#   fly launch --no-deploy --name tiny-stars-crm
+#   fly volumes create crm_data --size 1 --region yyz    # Toronto
+#   fly secrets set CRM_SESSION_SECRET=... CRM_INGEST_SECRET=... CRM_ALLOWED_ORIGIN=...
+#   fly deploy
+#
+# Secrets are set with `fly secrets`, never in this file. This file is committed.
+
+app = "tiny-stars-crm"
+primary_region = "yyz"
+
+[build]
+
+[env]
+  CRM_DATA_DIR = "/data"
+  CRM_HOST = "0.0.0.0"
+  CRM_PORT = "4317"
+  CRM_MODE = "production"
+
+# The database is a single file on this volume. One machine writes it, which is
+# why auto_stop below must never scale this past one instance.
+[mounts]
+  source = "crm_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 4317
+  force_https = true
+  auto_stop_machines = "suspend"
+  auto_start_machines = true
+  # Exactly one. SQLite has one writer, and two machines would each hold their
+  # own volume and silently diverge.
+  min_machines_running = 0
+  max_machines_running = 1
+
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "10s"
+    method = "GET"
+    path = "/healthz"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

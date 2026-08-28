@@ -6,55 +6,120 @@
 change that. Parents reach the website; the website posts one signed event to
 the CRM; nobody else reaches the CRM at all.
 
-Do not put this behind a guessable public route "temporarily".
+## Why not Vercel
 
-## Now: localhost
+This was asked, and the honest answer is that it would fail quietly.
 
-The current and correct setup while building.
+Vercel serverless functions have an **ephemeral filesystem**. Every invocation
+may be a fresh container, and anything written to disk is discarded. This CRM's
+entire design rests on a local SQLite file: that is where its speed comes from
+and why it works with no network. On Vercel it would appear to work for a few
+minutes inside one warm container and then start losing families, registrations
+and analytics, with no error anywhere.
+
+That is worse than not deploying. A CRM that loses a registration is worse than
+no CRM, because staff stop checking the one that never lost anything.
+
+Two ways to have it on Vercel anyway, neither free:
+
+- **Turso (hosted libSQL).** SQLite-compatible, so the schema and FTS5 survive.
+  Requires converting every database call from synchronous to asynchronous
+  across the whole server, and every query becomes a network round trip.
+- **Postgres.** A schema rewrite, and FTS5 becomes `tsvector`.
+
+Both are real options if being on Vercel matters more than the simplicity. The
+website stays on Vercel either way; it is stateless, which is what Vercel is
+good at.
+
+## Fly.io: the recommended host
+
+A long-running process with a real disk. The code deploys unchanged.
 
 ```bash
-npm install && npm run db:migrate && npm run db:seed && npm run build && npm start
+fly launch --no-deploy --name tiny-stars-crm
+fly volumes create crm_data --size 1 --region yyz     # Toronto
+fly secrets set \
+  CRM_SESSION_SECRET="$(node -e "console.log(require('crypto').randomBytes(48).toString('hex'))")" \
+  CRM_INGEST_SECRET="$(node -e "console.log(require('crypto').randomBytes(32).toString('hex'))")" \
+  CRM_ALLOWED_ORIGIN="https://tiny-stars-demo-titan-2ac2.vercel.app"
+fly deploy
 ```
 
-Bound to `127.0.0.1:4317`. Not reachable from the network.
+Then create the first real account:
 
-## Next: private network for the team
+```bash
+fly ssh console -C "sh -lc 'cd /app && CRM_NEW_PASSWORD=... node --disable-warning=ExperimentalWarning packages/server/src/seed/users.ts create you@tinystars.ca \"Your Name\" owner'"
+```
 
-When two or more people need it, in preference order:
+`fly.toml` pins `max_machines_running = 1` deliberately. SQLite has one writer,
+and two machines would each hold their own volume and silently diverge.
 
-1. **Tailscale (or equivalent WireGuard mesh).** Install on the machine running
-   the CRM and on each staff device. Set `CRM_HOST=0.0.0.0` so it binds to the
-   Tailscale interface, and rely on the mesh for access control. Nothing is
-   exposed to the internet.
-2. **A VPN into the nursery's network**, with the CRM on a fixed internal
-   address.
-3. **A small private VPS**, firewalled to known IPs, TLS terminated by a
-   reverse proxy. Only if 1 and 2 are impossible; it is the largest attack
-   surface of the three.
+**The Dockerfile has not been built.** Docker was unavailable on the machine it
+was written on. What HAS been verified is the layout it produces: the runtime
+stage's exact file set was assembled in a temp directory with no `node_modules`
+at all, and the server booted, ran its migrations, served `/healthz`, returned
+the security headers and served the SPA. Expect to fix small things on the first
+real `fly deploy`.
 
-For any of these, before you expose the port:
+Two bugs were found and fixed by doing that simulation, both of which would have
+crash-looped the container on boot:
 
-- [ ] `CRM_MODE=production`
-- [ ] `CRM_SESSION_SECRET` set explicitly, not auto-generated
-- [ ] Real user accounts created; every `@demo.local` account deleted
-- [ ] `npm run db:reset` understood to be disabled in production mode
-- [ ] Full-disk encryption on the host (there is no encryption at rest yet)
-- [ ] A backup that has been **restored** at least once
-- [ ] Rate limiting in front of the ingest endpoint
+1. The server imported `@crm/shared` as a bare specifier, which npm workspaces
+   resolve through a `node_modules` symlink that does not survive the copy.
+2. Copying the package into `node_modules` instead fails a second way: Node
+   refuses to strip TypeScript types for anything under `node_modules`.
+
+The server now imports the shared contract by relative path, so the image needs
+no `node_modules` whatsoever.
+
+## Alternatives
+
+- **Railway / Render** — same shape as Fly. Attach a persistent volume, set
+  `CRM_DATA_DIR` to it, run the same Dockerfile.
+- **Tailscale, staying local** — free and the most private. The CRM never leaves
+  your machine and is reachable only from your tailnet. Offline when the laptop
+  is, and Vercel needs a route into the tailnet to deliver registrations.
+
+## Before real family data goes in
+
+```bash
+npm run prod:check
+```
+
+It exits non-zero while anything is blocking, and it is deliberately
+pessimistic. It checks:
+
+- `CRM_MODE=production`
+- `CRM_SESSION_SECRET` set explicitly and long enough (on a host that replaces
+  the filesystem, the auto-generated on-disk key signs everyone out each deploy)
+- `CRM_INGEST_SECRET` set, long enough, and **different** from the session
+  secret — they are shared with different parties
+- `CRM_ALLOWED_ORIGIN` set and https
+- no `@demo.local` accounts, all of which have the password `demo1234`
+- no synthetic families left (`example.invalid` addresses)
+- an active owner exists, and no account has never signed in
+- migrations current, database integrity passing
+
+To clear the demo blockers:
+
+```bash
+npm run prod:harden              # shows what it would delete
+npm run prod:harden -- --force   # actually deletes it
+```
+
+The event log is append-only and is not deleted; it still records that the demo
+data existed.
 
 ## Connecting the website
-
-The website is on Vercel. The CRM is not. The website's serverless function must
-be able to reach the CRM's private address.
 
 **Website environment (Vercel → Settings → Environment Variables):**
 
 ```
-CRM_INGEST_URL     = https://crm.your-tailnet.ts.net/api/v1/ingest
-CRM_INGEST_SECRET  = <the shared secret>
+CRM_INGEST_URL     = https://tiny-stars-crm.fly.dev/api/v1/ingest
+CRM_INGEST_SECRET  = <the same value as the CRM's>
 ```
 
-**CRM environment (`.env`):**
+**CRM environment (`fly secrets`):**
 
 ```
 CRM_INGEST_SECRET  = <the same value>
@@ -63,42 +128,47 @@ CRM_ALLOWED_ORIGIN = https://tiny-stars-demo-titan-2ac2.vercel.app
 
 Neither may be prefixed `PUBLIC_`. Both are read server-side only.
 
-Generate the secret once, per environment:
+Verify: `GET https://<site>/api/registration` returns `{"configured": true}`,
+and `GET https://<crm>/api/v1/ingest/ping` returns `{"configured": true}`.
 
-```bash
-node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
-```
+Until both are set, the site behaves exactly as it ships: a preview that submits
+nothing.
 
-Verify from the website: `GET /api/registration` returns
-`{"configured": true}`. Verify from anywhere that can reach the CRM:
-`GET /api/v1/ingest/ping`.
+## What is hardened, and what is not
 
-If Vercel cannot reach a Tailscale address, the options are a Tailscale funnel
-restricted to Vercel's egress, or a queue the CRM polls. Do not solve it by
-making the CRM public.
+Done:
+
+- Sign-in throttling, per account and per address, tuned so one member of staff
+  fumbling a password does not lock out the office (see SECURITY.md)
+- `Secure` on the session cookie whenever the request arrived over TLS
+- CSP, HSTS (TLS only), `X-Frame-Options`, `Permissions-Policy`,
+  `Cross-Origin-Opener-Policy`, `nosniff`, `no-store` on every response
+- HMAC + 5-minute replay window + idempotency on the one anonymous endpoint
+- `X-Forwarded-For` trusted for throttling only, never for access
+
+Still open, and worth doing before this holds many real families:
+
+- **No encryption at rest.** Fly volumes are encrypted at the platform level;
+  the SQLite file itself is not.
+- **No automated backup.** Take one and *restore* it once. A backup that has
+  never been restored is a guess.
+- **No rate limiting on read endpoints.** Sign-in is throttled; the rest is not.
+- **No two-factor authentication.**
+- Consider putting Cloudflare Access or Tailscale in front, so the login page
+  is not reachable from the open internet at all.
 
 ## Domain cutover
 
-When the website moves from
-`https://tiny-stars-demo-titan-2ac2.vercel.app` to the production domain:
+When the website moves to the production domain:
 
-1. Update `CRM_ALLOWED_ORIGIN` in the CRM.
-2. Update `PUBLIC_SITE_URL` and set `PUBLIC_INDEXABLE=true` in the website.
-3. Nothing else changes. The CRM does not care what the website is called.
+1. Update `CRM_ALLOWED_ORIGIN` on the CRM.
+2. Update `PUBLIC_SITE_URL` and set `PUBLIC_INDEXABLE=true` on the website.
 
-## Before production
-
-Your specification, item 344. All of these, not most:
-
-- [ ] Website approved
-- [ ] CRM approved
-- [ ] Security reviewed against SECURITY.md, including the "known gaps"
-- [ ] Data migration tested with real volumes
-- [ ] Backup verified by restoring it
-- [ ] Rollback plan written down
+Nothing else changes. The CRM does not care what the website is called.
 
 ## Never
 
 - Never commit `.env`, `data/crm.db`, or `data/.session-key`.
 - Never use real family data in development. `CRM_MODE=demo` exists for this.
+- Never run more than one machine against one volume.
 - Never start the voice phase before the website and CRM are both stable.

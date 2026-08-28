@@ -8,7 +8,7 @@ import { join, normalize, extname, resolve } from 'node:path';
 import { connect, one } from './db/index.ts';
 import { config, REPO_ROOT } from './core/config.ts';
 import { migrateUp, applied, loadMigrations } from './db/migrate.ts';
-import { handle } from './http.ts';
+import { handle, securityHeaders } from './http.ts';
 import { router } from './routes.ts';
 
 const WEB_DIST = resolve(REPO_ROOT, 'packages/web/dist');
@@ -87,14 +87,14 @@ const server = createServer(async (req, res) => {
   const url = new URL(req.url ?? '/', 'http://localhost');
   const file = await serveStatic(url.pathname);
   if (file) {
-    res.writeHead(200, { 'content-type': file.type, 'x-content-type-options': 'nosniff' });
+    res.writeHead(200, { 'content-type': file.type, ...securityHeaders(req) });
     res.end(file.body);
     return;
   }
   // SPA fallback so deep links like /families/<id> work on a hard refresh.
   const index = await serveStatic('/index.html');
   if (index) {
-    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', ...securityHeaders(req) });
     res.end(index.body);
     return;
   }

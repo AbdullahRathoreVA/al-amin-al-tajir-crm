@@ -27,7 +27,9 @@
     "user:create": "node --disable-warning=ExperimentalWarning packages/server/src/seed/users.ts create",
     "user:password": "node --disable-warning=ExperimentalWarning packages/server/src/seed/users.ts password",
     "user:suspend": "node --disable-warning=ExperimentalWarning packages/server/src/seed/users.ts suspend",
-    "user:activate": "node --disable-warning=ExperimentalWarning packages/server/src/seed/users.ts activate"
+    "user:activate": "node --disable-warning=ExperimentalWarning packages/server/src/seed/users.ts activate",
+    "prod:check": "node --disable-warning=ExperimentalWarning packages/server/src/seed/production.ts check",
+    "prod:harden": "node --disable-warning=ExperimentalWarning packages/server/src/seed/production.ts harden"
   },
   "devDependencies": {
     "@types/node": "^24.13.3",

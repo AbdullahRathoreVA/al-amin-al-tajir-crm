@@ -17,7 +17,7 @@ import { indexEntity } from '../core/search.ts';
 import { notify, createTask } from '../core/notify.ts';
 import type {
   EventEnvelope, RegistrationData, TourRequestData, ContactData, GuardianInput, ChildInput, AnalyticsBatch,
-} from '@crm/shared';
+} from '../../../shared/src/contract.ts';
 import { ingestAnalytics, type AnalyticsResult } from './analytics.ts';
 
 export interface IngestResult {

@@ -119,15 +119,63 @@ export function verifySignature(rawBody: string, header: string | undefined, sec
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
-export function json(res: ServerResponse, status: number, payload: unknown): void {
+/** True when the request reached us over TLS, directly or via a proxy. */
+export function isSecureRequest(req: IncomingMessage): boolean {
+  const proto = req.headers['x-forwarded-proto'];
+  const first = (Array.isArray(proto) ? proto[0] : proto)?.split(',')[0]?.trim();
+  if (first) return first === 'https';
+  return 'encrypted' in req.socket;
+}
+
+/**
+ * Headers applied to every response.
+ *
+ * The CSP is genuinely restrictive because this app loads nothing remote: no
+ * CDN, no font host, no analytics script, no embedded anything. If a future
+ * change needs an external asset, widen this deliberately rather than dropping
+ * it.
+ */
+export function securityHeaders(req: IncomingMessage): Record<string, string> {
+  const headers: Record<string, string> = {
+    'x-content-type-options': 'nosniff',
+    'referrer-policy': 'no-referrer',
+    'x-frame-options': 'DENY',
+    'cross-origin-opener-policy': 'same-origin',
+    'cross-origin-resource-policy': 'same-origin',
+    'permissions-policy': 'geolocation=(), microphone=(), camera=(), payment=(), usb=()',
+    'content-security-policy': [
+      "default-src 'self'",
+      // Vite emits a couple of inline style attributes; scripts stay strict.
+      "script-src 'self'",
+      "style-src 'self' 'unsafe-inline'",
+      "img-src 'self' data:",
+      "font-src 'self'",
+      "connect-src 'self'",
+      "frame-ancestors 'none'",
+      "base-uri 'none'",
+      "form-action 'self'",
+      "object-src 'none'",
+    ].join('; '),
+  };
+  // Only over TLS. Sending HSTS on plain http is meaningless, and sending it
+  // from localhost can poison the browser for every other localhost app.
+  if (isSecureRequest(req)) {
+    headers['strict-transport-security'] = 'max-age=31536000; includeSubDomains';
+  }
+  return headers;
+}
+
+export function json(res: ServerResponse, status: number, payload: unknown, req?: IncomingMessage): void {
   const body = JSON.stringify(payload);
   res.writeHead(status, {
     'content-type': 'application/json; charset=utf-8',
     'content-length': Buffer.byteLength(body),
-    // This app renders no third-party content and loads nothing remote.
-    'x-content-type-options': 'nosniff',
-    'referrer-policy': 'no-referrer',
-    'x-frame-options': 'DENY',
+    'cache-control': 'no-store',
+    ...(req ? securityHeaders(req) : {
+      'x-content-type-options': 'nosniff',
+      'referrer-policy': 'no-referrer',
+      'x-frame-options': 'DENY',
+    }),
   });
   res.end(body);
 }
@@ -143,7 +191,7 @@ export async function handle(router: Router, req: IncomingMessage, res: ServerRe
   let body: unknown = undefined;
   if (rawBody) {
     try { body = JSON.parse(rawBody); }
-    catch { json(res, 400, { error: 'Request body is not valid JSON' }); return true; }
+    catch { json(res, 400, { error: 'Request body is not valid JSON' }, req); return true; }
   }
 
   const setCookies: string[] = [];
@@ -161,11 +209,18 @@ export async function handle(router: Router, req: IncomingMessage, res: ServerRe
       const bits = [
         `${name}=${encodeURIComponent(value)}`, 'Path=/', 'HttpOnly', 'SameSite=Lax',
       ];
+      // Secure whenever the request arrived over TLS. Set unconditionally and
+      // localhost breaks; never set and the session travels in clear over the
+      // internet. The proxy header is the only thing that knows which it is.
+      if (isSecureRequest(req)) bits.push('Secure');
       if (opts.maxAge !== undefined) bits.push(`Max-Age=${opts.maxAge}`);
       if (opts.expires) bits.push(`Expires=${new Date(opts.expires).toUTCString()}`);
       setCookies.push(bits.join('; '));
     },
-    clearCookie(name) { setCookies.push(`${name}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`); },
+    clearCookie(name) {
+      const secure = isSecureRequest(req) ? '; Secure' : '';
+      setCookies.push(`${name}=; Path=/; HttpOnly; SameSite=Lax${secure}; Max-Age=0`);
+    },
   };
 
   try {
@@ -173,16 +228,16 @@ export async function handle(router: Router, req: IncomingMessage, res: ServerRe
     const result = await found.route.handler(ctx);
     if (res.writableEnded) return true;
     if (setCookies.length) res.setHeader('set-cookie', setCookies);
-    json(res, result === undefined ? 204 : 200, result ?? null);
+    json(res, result === undefined ? 204 : 200, result ?? null, req);
   } catch (err) {
     if (setCookies.length && !res.headersSent) res.setHeader('set-cookie', setCookies);
     if (err instanceof HttpError) {
-      json(res, err.status, { error: err.message, ...(err.detail ? { detail: err.detail } : {}) });
+      json(res, err.status, { error: err.message, ...(err.detail ? { detail: err.detail } : {}) }, req);
     } else {
       // Never leak internals to the client; the operator gets the real thing on
       // stderr, which stays local. (spec 175 / 176)
       console.error('[crm] unhandled error on', req.method, url.pathname, err);
-      json(res, 500, { error: 'Something went wrong on the server. Check the server log.' });
+      json(res, 500, { error: 'Something went wrong on the server. Check the server log.' }, req);
     }
   }
   return true;

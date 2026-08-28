@@ -15,7 +15,7 @@ import {
   todaySummary, attention, pipeline, programHealth, dataHealth, systemHealth,
   toursToday, overdueFollowUps,
 } from './core/queries.ts';
-import { validateEnvelope } from '@crm/shared';
+import { validateEnvelope } from '../../shared/src/contract.ts';
 import { analyticsBundle, isWindow, type Window } from './core/analytics.ts';
 import { ingest } from './ingest/pipeline.ts';
 
@@ -564,6 +564,15 @@ router.get('/api/v1/meta', (c) => ({
     : [],
   contractVersion: 1,
 }));
+
+// ------------------------------------------------------------------ health
+
+/**
+ * Liveness, for the platform's health check. Anonymous and deliberately empty
+ * of detail: a probe must not tell an unauthenticated caller the version, the
+ * record counts, or whether anything is wrong.
+ */
+router.get('/healthz', () => ({ ok: true }), { anonymous: true });
 
 // ------------------------------------------------------------- analytics
 
