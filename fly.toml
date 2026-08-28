@@ -28,11 +28,21 @@ primary_region = "yyz"
 [http_service]
   internal_port = 4317
   force_https = true
-  auto_stop_machines = "suspend"
   auto_start_machines = true
-  # Exactly one. SQLite has one writer, and two machines would each hold their
-  # own volume and silently diverge.
-  min_machines_running = 0
+
+  # Never suspend, and never scale past one.
+  #
+  # min = 1 costs a little more than letting it sleep, and it is worth it. A
+  # suspended machine has to cold start, and the website gives up forwarding a
+  # registration after 6 seconds. The parent would still see "received" — the
+  # confirmation is deliberately not blocked on delivery — while the CRM never
+  # got it. A dropped registration is the one failure this system exists to
+  # prevent.
+  #
+  # max = 1 because SQLite has one writer. Two machines would each mount their
+  # own volume and diverge without ever saying so.
+  auto_stop_machines = "off"
+  min_machines_running = 1
   max_machines_running = 1
 
   [[http_service.checks]]
