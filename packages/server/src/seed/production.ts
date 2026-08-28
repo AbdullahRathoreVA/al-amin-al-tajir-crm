@@ -12,6 +12,7 @@ import { connect, one, many, run, tx, getDb } from '../db/index.ts';
 import { config } from '../core/config.ts';
 import { migrateUp, applied, loadMigrations } from '../db/migrate.ts';
 import { nowIso } from '../core/util.ts';
+import { newestBackup } from '../core/backup.ts';
 
 interface Finding { level: 'blocker' | 'warning' | 'ok'; message: string; fix?: string }
 
@@ -135,12 +136,27 @@ export function preflight(): Finding[] {
   } else f.push({ level: 'ok', message: 'No synthetic family data' });
 
   // --- backup -------------------------------------------------------------
-  f.push({
-    level: 'warning',
-    message: 'No automated backup exists yet.',
-    fix: 'Take a copy of the database and RESTORE it once before real data goes in. ' +
-         'A backup that has never been restored is a guess.',
-  });
+  // This used to warn unconditionally, without looking. A preflight that cries
+  // wolf about a thing it never checked is worse than no preflight.
+  const backup = newestBackup();
+  if (!backup) {
+    f.push({
+      level: 'blocker',
+      message: 'No backup exists. Losing the disk would lose every family.',
+      fix: 'npm run backup, then npm run backup:test to prove it restores.',
+    });
+  } else if (backup.ageHours > 48) {
+    f.push({
+      level: 'warning',
+      message: `The newest backup is ${Math.round(backup.ageHours)}h old.`,
+      fix: 'Check the backup schedule is running.',
+    });
+  } else {
+    f.push({
+      level: 'ok',
+      message: `Backup ${backup.file} taken ${backup.ageHours}h ago`,
+    });
+  }
 
   return f;
 }

@@ -1,6 +1,8 @@
+import { useState } from 'react';
+import { api } from '../lib/api.ts';
 import { useApi } from '../lib/hooks.ts';
 import { useRouter } from '../lib/router.tsx';
-import { Panel, Badge, Empty, Spinner, ErrorNote, When, type Tone } from '../ui/kit.tsx';
+import { Panel, Badge, Button, Empty, Spinner, ErrorNote, When, type Tone } from '../ui/kit.tsx';
 
 interface Check { id: string; label: string; state: 'good' | 'warning' | 'critical' | 'unknown'; detail: string }
 
@@ -16,6 +18,7 @@ const STATE_TONE: Record<Check['state'], Tone> = {
 };
 
 export function System() {
+  const [busy, setBusy] = useState(false);
   const { query } = useRouter();
   const tab = query.get('tab') ?? 'health';
   const res = useApi<SystemData>('/system/health');
@@ -47,7 +50,18 @@ export function System() {
         </ul>
       </Panel>
 
-      <Panel title="Inbound events from the website" pad={false}>
+      <Panel
+        title="Inbound events from the website"
+        pad={false}
+        action={res.data.ingest.some((e) => e.status === 'failed') ? (
+          <Button size="sm" disabled={busy} onClick={async () => {
+            if (!confirm('Clear the failed events? Do this once the cause is fixed.')) return;
+            setBusy(true);
+            try { await api.post('/system/ingest/dismiss-failed'); res.reload(); }
+            finally { setBusy(false); }
+          }}>Clear failed</Button>
+        ) : undefined}
+      >
         {res.data.ingest.length === 0 ? (
           <Empty
             title="No events received yet"

@@ -847,6 +847,44 @@ router.get('/api/v1/families/:id/ai-facts', (c) => {
 
 router.get('/api/v1/ai/brief', async (c) => await dailyBrief(c.user!));
 
+
+// ------------------------------------------------------ inbound recovery
+
+/**
+ * A failed website event, retried. The original payload is not kept (it may
+ * contain family details), so this clears the event so the website can resend,
+ * rather than replaying it from here.
+ */
+router.post('/api/v1/system/ingest/:eventId/dismiss', (c) => {
+  c.require('settings:write');
+  const row = one<{ event_id: string; status: string; type: string }>(
+    'SELECT event_id, status, type FROM ingest_events WHERE event_id = ?', c.params.eventId!);
+  if (!row) throw notFound('No such inbound event');
+  if (row.status !== 'failed') throw badRequest('Only failed events can be dismissed');
+
+  run('DELETE FROM ingest_events WHERE event_id = ?', row.event_id);
+  recordEvent({
+    entityType: 'system', entityId: 'ingest', type: 'updated', actor: actorOf(c),
+    summary: `Dismissed a failed ${row.type} event after resolving the cause`,
+  });
+  logAccess(c.user!.id, 'ingest_dismissed', undefined, undefined, row.event_id);
+  return { dismissed: row.event_id };
+});
+
+/** Clears every failed inbound event at once, after fixing whatever broke. */
+router.post('/api/v1/system/ingest/dismiss-failed', (c) => {
+  c.require('settings:write');
+  const n = run("DELETE FROM ingest_events WHERE status = 'failed'").changes;
+  if (n > 0) {
+    recordEvent({
+      entityType: 'system', entityId: 'ingest', type: 'updated', actor: actorOf(c),
+      summary: `Dismissed ${n} failed inbound event(s) after resolving the cause`,
+    });
+  }
+  logAccess(c.user!.id, 'ingest_dismissed_all', undefined, undefined, String(n));
+  return { dismissed: n };
+});
+
 // ------------------------------------------------------------------ health
 
 /**
