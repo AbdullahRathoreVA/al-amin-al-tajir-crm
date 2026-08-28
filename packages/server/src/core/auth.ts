@@ -45,8 +45,12 @@ export function verifyPassword(password: string, stored: string): boolean {
 export interface SessionResult { token: string; expiresAt: string; user: User }
 
 export function login(email: string, password: string, userAgent?: string): SessionResult | null {
+  // Explicit, including the hash, because this is the one place that needs it.
+  // The destructure below removes it again before anything is returned.
   const row = one<User & { password_hash: string }>(
-    'SELECT * FROM users WHERE email = ? AND status = ?', email.trim().toLowerCase(), 'active',
+    `SELECT id, email, name, role, status, created_at, last_login_at, password_hash
+       FROM users WHERE email = ? AND status = ?`,
+    email.trim().toLowerCase(), 'active',
   );
   // Hash anyway when the user is missing, so a wrong email and a wrong password
   // take the same time. Otherwise response timing enumerates accounts.
@@ -63,10 +67,21 @@ export function login(email: string, password: string, userAgent?: string): Sess
   return { token, expiresAt, user: { ...user } as User };
 }
 
+/**
+ * Columns that may leave this module. Written out rather than `u.*` because
+ * `u.*` shipped the scrypt hash of every signed-in user's password straight to
+ * the browser via /auth/me. TypeScript could not catch it: the row was typed as
+ * `User`, which has no password_hash, so the annotation was simply a lie about
+ * what SQL returned. Only reading an actual response caught it.
+ *
+ * Never put `*` in a query whose result reaches a client.
+ */
+const USER_COLUMNS = 'u.id, u.email, u.name, u.role, u.status, u.created_at, u.last_login_at';
+
 export function userForToken(token: string | null | undefined): User | null {
   if (!token) return null;
   const row = one<User>(
-    `SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id
+    `SELECT ${USER_COLUMNS} FROM sessions s JOIN users u ON u.id = s.user_id
      WHERE s.token_hash = ? AND s.revoked_at IS NULL AND s.expires_at > ? AND u.status = 'active'`,
     sha256(token), nowIso(),
   );

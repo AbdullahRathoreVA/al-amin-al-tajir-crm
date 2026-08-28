@@ -24,7 +24,8 @@ const { seedReference } = await import('../packages/server/src/seed/demo.ts');
 const { ingest } = await import('../packages/server/src/ingest/pipeline.ts');
 const { validateEnvelope, validateRegistration } = await import('../packages/shared/src/contract.ts');
 const { reindexAll, search } = await import('../packages/server/src/core/search.ts');
-const { hashPassword, verifyPassword, can } = await import('../packages/server/src/core/auth.ts');
+const { hashPassword, verifyPassword, can, createUser, login, userForToken } =
+  await import('../packages/server/src/core/auth.ts');
 const { verifySignature } = await import('../packages/server/src/http.ts');
 const { attention, dataHealth } = await import('../packages/server/src/core/queries.ts');
 const { checkLoginAllowed, recordLoginFailure, recordLoginSuccess, resetLoginLimits } =
@@ -402,6 +403,29 @@ describe('security', () => {
       'the account that failed is locked');
     assert.equal(checkLoginAllowed('colleague@example.invalid', office).allowed, true,
       'everyone else at the same address can still sign in');
+  });
+
+  test('a password hash never leaves the auth module', () => {
+    // Regression, and it was live before it was caught. userForToken did
+    // `SELECT u.*`, so /auth/me handed every signed-in browser the scrypt hash
+    // of that user's password. TypeScript could not see it: the row was typed
+    // as `User`, which has no password_hash, so the annotation was a lie about
+    // what SQL returned. Only reading a real response found it.
+    const email = `leak-${randomUUID().slice(0, 8)}@example.invalid`;
+    createUser(email, 'Leak Check', 'owner', 'a-long-enough-password');
+
+    const session = login(email, 'a-long-enough-password');
+    assert.ok(session, 'the test user should be able to sign in');
+
+    // Everything the API hands back about a user, checked as serialised JSON:
+    // a nested field would slip past a key-by-key check.
+    const fromLogin = JSON.stringify(session!.user);
+    const fromToken = JSON.stringify(userForToken(session!.token));
+
+    for (const [where, blob] of [['login', fromLogin], ['userForToken', fromToken]] as const) {
+      assert.ok(!blob.includes('password_hash'), `${where} leaked the password_hash key`);
+      assert.ok(!blob.includes('scrypt$'), `${where} leaked the hash itself`);
+    }
   });
 
   test('roles cannot exceed their capabilities', () => {
