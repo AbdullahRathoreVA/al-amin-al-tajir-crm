@@ -11,6 +11,7 @@
  */
 import { connect, run, one, tx } from '../db/index.ts';
 import { config } from '../core/config.ts';
+import { seedReference as seedRef } from '../core/reference.ts';
 import { migrateUp } from '../db/migrate.ts';
 import { newId, nowIso } from '../core/util.ts';
 import { hashPassword } from '../core/auth.ts';
@@ -25,55 +26,17 @@ const iso = (daysFromNow: number, hour = 10, minute = 0): string => {
   return d.toISOString();
 };
 
-export const STAGES: [string, string, number, number, number][] = [
-  // id, label, sort, is_open, is_won
-  ['new', 'New', 10, 1, 0],
-  ['contacted', 'Contacted', 20, 1, 0],
-  ['qualified', 'Qualified', 30, 1, 0],
-  ['tour_requested', 'Tour requested', 40, 1, 0],
-  ['tour_booked', 'Tour booked', 50, 1, 0],
-  ['tour_completed', 'Tour completed', 60, 1, 0],
-  ['application_started', 'Application started', 70, 1, 0],
-  ['application_submitted', 'Application submitted', 80, 1, 0],
-  ['waitlist', 'Waitlist', 90, 1, 0],
-  ['offered', 'Offered', 100, 1, 0],
-  ['enrolled', 'Enrolled', 110, 0, 1],
-  ['lost', 'Lost', 120, 0, 0],
-  ['unresponsive', 'Unresponsive', 130, 0, 0],
-  ['cancelled', 'Cancelled', 140, 0, 0],
-];
+// STAGES, PROGRAMS and seedReference now live in core/reference.ts: they are
+// reference data the CRM needs in production, not demo data.
+export { seedReference } from '../core/reference.ts';
 
-const PROGRAMS: [string, string, string, number | null][] = [
-  // slug, name, age label, capacity (null = never recorded)
-  ['twinkle-stars', 'Twinkle Stars', '12-18 months', 12],
-  ['comet-stars', 'Comet Stars', '18 months - 3 years', 16],
-  ['nova-stars', 'Nova Stars', '3-5 years', 24],
-  ['galaxy-stars', 'Galaxy Stars', '5-6 years', null],
-  ['cosmic-stars', 'Cosmic Stars', '6-12 years', null],
-  ['learning-adventures', 'Learning Adventures', 'Ages 2-5', 18],
-];
-
+/** Demo staff accounts. Only ever created by this seeder, never at boot. */
 const USERS: [string, string, string, string][] = [
-  // email, name, role, password
   ['owner@demo.local', 'Amara Osei', 'owner', 'demo1234'],
   ['director@demo.local', 'Priya Raman', 'director', 'demo1234'],
   ['admissions@demo.local', 'Jonah Blake', 'admissions', 'demo1234'],
   ['educator@demo.local', 'Sofia Marchetti', 'educator', 'demo1234'],
 ];
-
-export function seedReference(): void {
-  const now = nowIso();
-  for (const [id, label, sort, open, won] of STAGES) {
-    if (one('SELECT id FROM lead_stages WHERE id = ?', id)) continue;
-    run('INSERT INTO lead_stages (id, label, sort_order, is_open, is_won) VALUES (?,?,?,?,?)',
-      id, label, sort, open, won);
-  }
-  for (const [i, [slug, name, age, cap]] of PROGRAMS.entries()) {
-    if (one('SELECT id FROM programs WHERE slug = ?', slug)) continue;
-    run('INSERT INTO programs (id, slug, name, age_label, capacity, active, sort_order, created_at) VALUES (?,?,?,?,?,1,?,?)',
-      newId(), slug, name, age, cap, i * 10, now);
-  }
-}
 
 function seedUsers(): string[] {
   const ids: string[] = [];
@@ -280,7 +243,7 @@ export function seedDemo(): void {
     throw new Error('Refusing to seed demo data: CRM_MODE is "production". Demo records must never reach a real install.');
   }
   tx(() => {
-    seedReference();
+    seedRef();
     const userIds = seedUsers();
     const already = one<{ n: number }>('SELECT COUNT(*) n FROM families')?.n ?? 0;
     if (already > 0) {

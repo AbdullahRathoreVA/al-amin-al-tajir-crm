@@ -11,6 +11,7 @@ import { migrateUp, applied, loadMigrations } from './db/migrate.ts';
 import { seedTemplates } from './core/drafts.ts';
 import { startBackupSchedule, newestBackup } from './core/backup.ts';
 import { seedAutomations, startAutomationSchedule } from './core/automations.ts';
+import { seedReference, referenceIsPresent } from './core/reference.ts';
 import { handle, securityHeaders } from './http.ts';
 import { router } from './routes.ts';
 
@@ -56,6 +57,13 @@ function bootHealthCheck(): void {
   }
   if (users === 0) {
     console.log('[crm] no users yet. Create one:  npm run user:create');
+  }
+
+  const ref2 = referenceIsPresent();
+  if (!ref2.ok) {
+    console.error('[crm] NO LEAD STAGES. Registrations will fail on arrival.');
+  } else {
+    console.log(`[crm] reference ${ref2.stages} stages, ${ref2.programs} programs`);
   }
 
   const backup = newestBackup();
@@ -114,6 +122,13 @@ await connect();
 migrateUp();
 // Message templates are reference data, not demo data, so they are seeded in
 // production too. seedTemplates() only inserts what is missing.
+// Lead stages and programs. Without these the CRM accepts a registration and
+// then throws while creating the lead, losing it. Reference data, not demo
+// data, so it seeds in every mode.
+const ref = seedReference();
+if (ref.stages || ref.programs) {
+  console.log(`[crm] seeded ${ref.stages} lead stage(s) and ${ref.programs} program(s)`);
+}
 const newTemplates = seedTemplates();
 const newAutomations = seedAutomations();
 if (newAutomations) console.log(`[crm] seeded ${newAutomations} automation(s)`);

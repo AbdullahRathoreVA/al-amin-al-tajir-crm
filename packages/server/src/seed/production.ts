@@ -112,6 +112,17 @@ export function preflight(): Finding[] {
   if (pending > 0) f.push({ level: 'blocker', message: `${pending} migration(s) pending.`, fix: 'npm run db:migrate' });
   else f.push({ level: 'ok', message: 'Migrations are current' });
 
+  // --- reference data -------------------------------------------------------
+  const stages = count('SELECT COUNT(*) n FROM lead_stages');
+  const programs = count('SELECT COUNT(*) n FROM programs');
+  if (stages === 0) {
+    f.push({
+      level: 'blocker',
+      message: 'No lead stages. A registration would be accepted and then thrown away.',
+      fix: 'Restart the server; reference data seeds at boot.',
+    });
+  } else f.push({ level: 'ok', message: `${stages} lead stages, ${programs} programs` });
+
   // --- leftovers ----------------------------------------------------------
   const demoFamilies = count(
     `SELECT COUNT(*) n FROM guardians WHERE email LIKE '%@example.invalid'`);
