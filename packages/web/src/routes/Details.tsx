@@ -5,6 +5,7 @@ import { Link, useParams } from '../lib/router.tsx';
 import {
   Panel, Badge, Button, Empty, Spinner, ErrorNote, When, clockTime, toneForStatus, NotMeasured,
 } from '../ui/kit.tsx';
+import { CompletenessPanel, DraftComposer, DraftHistory } from '../ui/Compose.tsx';
 
 interface FamilyDetailData {
   family: Record<string, string | number | null>;
@@ -20,7 +21,7 @@ interface FamilyDetailData {
   sensitiveVisible: boolean;
 }
 
-const TABS = ['Overview', 'Children', 'Timeline', 'Tours', 'Registrations', 'Tasks', 'Notes'] as const;
+const TABS = ['Overview', 'Children', 'Timeline', 'Messages', 'Tours', 'Registrations', 'Tasks', 'Notes'] as const;
 type Tab = (typeof TABS)[number];
 
 export function FamilyDetail() {
@@ -82,6 +83,7 @@ export function FamilyDetail() {
                    className="inline-flex min-h-11 items-center rounded-lg border px-4 text-sm font-medium"
                    style={{ borderColor: 'var(--line-strong)', background: 'var(--surface-inset)' }}>Email</a>
               )}
+              <Button onClick={() => setTab('Messages')}>Write follow-up</Button>
               <Button onClick={() => setTab('Notes')}>Add note</Button>
             </div>
           </div>
@@ -198,6 +200,13 @@ export function FamilyDetail() {
       )}
 
       {tab === 'Timeline' && <Timeline events={d.timeline} />}
+
+      {tab === 'Messages' && (
+        <div className="grid gap-4 lg:grid-cols-2">
+          <DraftComposer familyId={id} onSent={res.reload} />
+          <DraftHistory familyId={id} />
+        </div>
+      )}
 
       {tab === 'Tours' && (
         <Panel title="Tours" pad={false}>
@@ -410,7 +419,10 @@ export function RegistrationDetail() {
           )}
         </Panel>
 
-        <Timeline events={res.data.timeline} />
+        <div className="flex flex-col gap-4">
+          <CompletenessPanel registrationId={id} />
+          <Timeline events={res.data.timeline} />
+        </div>
       </div>
     </div>
   );

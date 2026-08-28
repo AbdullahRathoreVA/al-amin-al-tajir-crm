@@ -30,6 +30,9 @@ const { verifySignature } = await import('../packages/server/src/http.ts');
 const { attention, dataHealth } = await import('../packages/server/src/core/queries.ts');
 const { checkLoginAllowed, recordLoginFailure, recordLoginSuccess, resetLoginLimits } =
   await import('../packages/server/src/core/ratelimit.ts');
+const { assessRegistration } = await import('../packages/server/src/core/completeness.ts');
+const { seedTemplates, composeDraft, suggestTemplate, saveDraft } =
+  await import('../packages/server/src/core/drafts.ts');
 
 before(async () => {
   await connect();
@@ -51,6 +54,7 @@ const registration = (over: Record<string, unknown> = {}) => ({
 });
 
 const countRows = (sql: string, ...p: string[]) => Number(one<{ n: number }>(sql, ...p)?.n ?? 0);
+const execSql = (sql: string, ...p: string[]) => { one(sql, ...p); };
 
 /**
  * ingest() returns a union now that analytics shares the entry point. Every
@@ -330,6 +334,156 @@ describe('search', () => {
     // "NEAR" is matched as the literal word, not as the FTS NEAR operator: a
     // real operator would have thrown on this malformed usage.
     assert.doesNotThrow(() => search('NEAR(Whitfield Lindqvist'));
+  });
+});
+
+
+// ------------------------------------------------------------ completeness
+
+describe('registration completeness', () => {
+  test('a website registration is incomplete, and says exactly why', () => {
+    const env = validateEnvelope(envelope('registration.created', registration({
+      guardian: { fullName: 'Selma Bright', email: 'selma@example.invalid', phone: '416-555-0808' },
+      child: { firstName: 'Otis', ageBand: '3-5 years' },
+    })));
+    assert.equal(env.ok, true); if (!env.ok) return;
+    const r = asFamily(ingest(env.value));
+
+    const c = assessRegistration(r.registrationId!);
+    assert.ok(c, 'the registration should be assessable');
+    assert.equal(c!.status, 'incomplete');
+    assert.ok(c!.requiredMissing > 0);
+
+    const fields = c!.gaps.map((g) => g.field);
+    // A website form deliberately does not ask for these, so a submitted
+    // registration is always incomplete until a person fills the rest in.
+    assert.ok(fields.includes('child.date_of_birth'), 'DOB must be flagged');
+    assert.ok(fields.includes('emergency_contact'), 'a second contact must be flagged');
+    assert.ok(fields.includes('authorized_pickup'), 'pickup authorisation must be flagged');
+
+    for (const g of c!.gaps) {
+      assert.ok(g.why.length > 10, 'gap ' + g.field + ' must explain itself');
+      assert.ok(g.where, 'gap ' + g.field + ' must say where to fix it');
+    }
+  });
+
+  test('the score counts only required fields, so advice does not dilute it', () => {
+    const env = validateEnvelope(envelope('registration.created', registration({
+      guardian: { fullName: 'Ada Nkemelu', email: 'ada.n@example.invalid', phone: '416-555-0909' },
+      child: { firstName: 'Chike', ageBand: '3-5 years' },
+    })));
+    assert.equal(env.ok, true); if (!env.ok) return;
+    const r = asFamily(ingest(env.value));
+    const c = assessRegistration(r.registrationId!)!;
+
+    assert.ok(c.percent >= 0 && c.percent <= 100, 'percent out of range: ' + c.percent);
+    const rec = c.gaps.filter((g) => g.severity === 'recommended').map((g) => g.field);
+    assert.ok(rec.includes('child.last_name') || rec.includes('guardian.last_name'),
+      'a missing surname is advice, not a blocker');
+  });
+
+  test('an unknown registration returns null rather than an empty assessment', () => {
+    assert.equal(assessRegistration('does-not-exist'), null);
+  });
+});
+
+// ----------------------------------------------------------------- drafts
+
+describe('message drafts', () => {
+  test('composes a message with the family details filled in', () => {
+    seedTemplates();
+    const env = validateEnvelope(envelope('registration.created', registration({
+      guardian: { fullName: 'Marta Kovac', email: 'marta@example.invalid', phone: '416-555-0111' },
+      child: { firstName: 'Zora', ageBand: '3-5 years' },
+    })));
+    assert.equal(env.ok, true); if (!env.ok) return;
+    const r = asFamily(ingest(env.value));
+
+    const draft = composeDraft(r.familyId, 'tpl_registration_received', 'Priya Raman');
+    assert.equal(draft.blocked, false);
+    assert.equal(draft.to, 'marta@example.invalid');
+    assert.ok(draft.body.includes('Marta'), 'the guardian is addressed by name');
+    assert.ok(draft.body.includes('Zora'), 'the child is named');
+    assert.ok(draft.body.includes('Priya Raman'), 'it is signed by the person sending it');
+    assert.ok(!draft.body.includes('{{'),
+      'no placeholder may survive into a parent-facing message');
+  });
+
+  test('refuses to compose for a family nobody can be reached at', () => {
+    const familyId = randomUUID();
+    const now = new Date().toISOString();
+    execSql(
+      'INSERT INTO families (id, name, status, source, created_at, updated_at) ' +
+      "VALUES (?, 'Unreachable family', 'prospective', 'manual', ?, ?)",
+      familyId, now, now);
+
+    const draft = composeDraft(familyId, 'tpl_no_response', 'Someone');
+    assert.equal(draft.blocked, true, 'a family with no guardian must be blocked');
+    assert.ok(draft.warnings.length > 0);
+    assert.equal(draft.body, '', 'a blocked draft must not render a body');
+  });
+
+  test('an opted-out guardian blocks the draft, it does not merely warn', () => {
+    const env = validateEnvelope(envelope('registration.created', registration({
+      guardian: { fullName: 'Quiet Person', email: 'quiet@example.invalid', phone: '416-555-0222' },
+      child: { firstName: 'Wren', ageBand: '3-5 years' },
+    })));
+    assert.equal(env.ok, true); if (!env.ok) return;
+    const r = asFamily(ingest(env.value));
+    execSql('UPDATE guardians SET opted_out = 1 WHERE family_id = ?', r.familyId);
+
+    const draft = composeDraft(r.familyId, 'tpl_no_response', 'Someone');
+    assert.equal(draft.blocked, true, 'consent is not a warning to click past');
+    assert.ok(draft.warnings.join(' ').toLowerCase().includes('opted out'));
+  });
+
+  test('warns when a family has siblings, because the draft names only one', () => {
+    const email = 'sibs-' + randomUUID().slice(0, 8) + '@example.invalid';
+    for (const name of ['Elif', 'Deniz']) {
+      const env = validateEnvelope(envelope('registration.created', registration({
+        guardian: { fullName: 'Yusuf Demir', email, phone: '416-555-0333' },
+        child: { firstName: name, ageBand: '3-5 years' },
+      })));
+      assert.equal(env.ok, true); if (!env.ok) return;
+      ingest(env.value);
+    }
+    const fam = one<{ id: string }>(
+      'SELECT family_id AS id FROM guardians WHERE email_norm = ?', email)!;
+    const draft = composeDraft(fam.id, 'tpl_no_response', 'Someone');
+    assert.equal(draft.blocked, false);
+    assert.ok(draft.warnings.some((w) => /2 children/.test(w)),
+      'expected a sibling warning, got: ' + JSON.stringify(draft.warnings));
+  });
+
+  test('suggests the template that matches what is actually happening', () => {
+    const env = validateEnvelope(envelope('registration.created', registration({
+      guardian: { fullName: 'Half Done', email: 'half@example.invalid', phone: '416-555-0444' },
+      child: { firstName: 'Pip', ageBand: '3-5 years' },
+      completedSteps: 2, totalSteps: 5,
+    })));
+    assert.equal(env.ok, true); if (!env.ok) return;
+    const r = asFamily(ingest(env.value));
+    assert.equal(suggestTemplate(r.familyId), 'tpl_registration_incomplete');
+  });
+
+  test('marking a draft sent counts as contact, so the nagging stops', () => {
+    const env = validateEnvelope(envelope('registration.created', registration({
+      guardian: { fullName: 'Contacted Soon', email: 'soon@example.invalid', phone: '416-555-0555' },
+      child: { firstName: 'Ines', ageBand: '3-5 years' },
+    })));
+    assert.equal(env.ok, true); if (!env.ok) return;
+    const r = asFamily(ingest(env.value));
+
+    const before = one<{ last_contact_at: string | null }>(
+      'SELECT last_contact_at FROM leads WHERE id = ?', r.leadId!);
+    assert.equal(before?.last_contact_at, null);
+
+    const draft = composeDraft(r.familyId, 'tpl_registration_received', 'Priya Raman');
+    saveDraft(r.familyId, draft, { type: 'user', id: null }, 'sent');
+
+    const after = one<{ last_contact_at: string | null }>(
+      'SELECT last_contact_at FROM leads WHERE id = ?', r.leadId!);
+    assert.ok(after?.last_contact_at, 'sending must reset the follow-up clock');
   });
 });
 

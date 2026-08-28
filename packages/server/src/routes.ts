@@ -17,6 +17,8 @@ import {
 } from './core/queries.ts';
 import { validateEnvelope } from '../../shared/src/contract.ts';
 import { analyticsBundle, isWindow, type Window } from './core/analytics.ts';
+import { assessRegistration, assessFamilyRegistration, incompleteRegistrations } from './core/completeness.ts';
+import { templates, composeDraft, suggestTemplate, saveDraft, draftsFor } from './core/drafts.ts';
 import { ingest } from './ingest/pipeline.ts';
 
 export const router = new Router();
@@ -564,6 +566,71 @@ router.get('/api/v1/meta', (c) => ({
     : [],
   contractVersion: 1,
 }));
+
+
+// ------------------------------------------------------- completeness
+
+router.get('/api/v1/registrations/:id/completeness', (c) => {
+  c.require('registration:read');
+  const result = assessRegistration(c.params.id!);
+  if (!result) throw notFound('No such registration');
+  return result;
+});
+
+router.get('/api/v1/completeness/incomplete', (c) => {
+  c.require('registration:read');
+  return { registrations: incompleteRegistrations(intParam(c.query.get('limit'), 50)) };
+});
+
+// ------------------------------------------------------------- drafts
+
+router.get('/api/v1/templates', (c) => {
+  c.require('note:write');
+  return { templates: templates() };
+});
+
+/**
+ * Composes a message. Does NOT send: nothing in this system sends anything to a
+ * parent, by design. The response carries the recipient and any warnings so the
+ * person pressing send sees them first.
+ */
+router.get('/api/v1/families/:id/draft', (c) => {
+  c.require('note:write');
+  const familyId = c.params.id!;
+  const templateId = c.query.get('template') || suggestTemplate(familyId);
+  try {
+    const draft = composeDraft(familyId, templateId, c.user!.name);
+    return { draft, suggested: templateId };
+  } catch (err) {
+    throw badRequest(err instanceof Error ? err.message : 'Could not compose a draft');
+  }
+});
+
+router.get('/api/v1/families/:id/drafts', (c) => {
+  c.require('note:write');
+  return { drafts: draftsFor(c.params.id!) };
+});
+
+/** Records what a person decided to do with a draft. */
+router.post('/api/v1/families/:id/draft', (c) => {
+  c.require('note:write');
+  const familyId = c.params.id!;
+  const b = requireBody<{ templateId?: string; status?: string; body?: string; subject?: string }>(c);
+  const valid = ['composed', 'sent', 'discarded'] as const;
+  const status = (b.status ?? 'composed') as (typeof valid)[number];
+  if (!valid.includes(status)) throw badRequest(`status must be one of: ${valid.join(', ')}`);
+
+  const draft = composeDraft(familyId, b.templateId ?? suggestTemplate(familyId), c.user!.name);
+  if (draft.blocked && status === 'sent') {
+    throw badRequest('This draft cannot be sent', draft.warnings);
+  }
+  // A person may have edited the wording; store what they actually had.
+  if (typeof b.body === 'string' && b.body.trim()) draft.body = b.body.trim();
+  if (typeof b.subject === 'string') draft.subject = b.subject;
+
+  const id = saveDraft(familyId, draft, actorOf(c), status);
+  return { id, status };
+});
 
 // ------------------------------------------------------------------ health
 

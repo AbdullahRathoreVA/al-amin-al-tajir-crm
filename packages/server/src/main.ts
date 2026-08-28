@@ -8,6 +8,7 @@ import { join, normalize, extname, resolve } from 'node:path';
 import { connect, one } from './db/index.ts';
 import { config, REPO_ROOT } from './core/config.ts';
 import { migrateUp, applied, loadMigrations } from './db/migrate.ts';
+import { seedTemplates } from './core/drafts.ts';
 import { handle, securityHeaders } from './http.ts';
 import { router } from './routes.ts';
 
@@ -104,6 +105,10 @@ const server = createServer(async (req, res) => {
 
 await connect();
 migrateUp();
+// Message templates are reference data, not demo data, so they are seeded in
+// production too. seedTemplates() only inserts what is missing.
+const newTemplates = seedTemplates();
+if (newTemplates) console.log(`[crm] seeded ${newTemplates} message template(s)`);
 bootHealthCheck();
 
 server.listen(config.port, config.host, () => {
