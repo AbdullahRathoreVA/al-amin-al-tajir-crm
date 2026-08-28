@@ -94,6 +94,15 @@ has tests behind it.
   2D fallback that is not a downgrade in capability.
 - **Roles and permissions** — capability-based. An educator cannot see a date of
   birth or export the family list.
+- **Website analytics** — visits, page views, real time-on-page, a
+  visit-to-enquiry funnel that names the step people drop at, traffic sources,
+  most-viewed pages, clicks by name and devices. No cookies, no persistent
+  identifier, no IP stored, and free text is dropped by the validator rather
+  than truncated. A test plants a name, an address and a health note in the
+  props and asserts none of them reach storage.
+- **Sign-in throttling** — per account and per address, tuned so one member of
+  staff fumbling a password does not lock out everyone behind the same office
+  address.
 - **Local-first** — SQLite on disk, WAL mode. No network needed for any of the
   above.
 
@@ -165,10 +174,29 @@ not; here is the honest accounting.
 
 ---
 
+## Deploying
+
+Short version: **not Vercel.** Vercel functions have an ephemeral filesystem, so
+a SQLite file there loses data silently — which is worse than not deploying at
+all. Fly.io config is in `fly.toml` and the `Dockerfile`, and the reasoning plus
+the Turso/Postgres alternatives are in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+
+Before real family data goes anywhere:
+
+```bash
+npm run prod:check               # pessimistic preflight, non-zero while blocked
+npm run prod:harden -- --force   # remove demo accounts and synthetic families
+```
+
+The Dockerfile has **not been built** — Docker was unavailable here. The layout
+it produces was verified instead: the exact runtime file set was assembled with
+no `node_modules` and confirmed to boot, migrate, serve and return its security
+headers. Expect small fixes on the first real `fly deploy`.
+
 ## Testing
 
 ```bash
-npm test          # 27 tests
+npm test          # 31 tests
 npm run typecheck
 ```
 
