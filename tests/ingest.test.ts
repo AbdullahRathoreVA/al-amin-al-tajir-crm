@@ -40,6 +40,8 @@ const { createBackup, listBackups, testRestore, pruneBackups } =
   await import('../packages/server/src/core/backup.ts');
 const { seedAutomations, listAutomations, runAutomation, runsFor, disableAll } =
   await import('../packages/server/src/core/automations.ts');
+const { factsForFamily, ruleSummary, summariseFamily, dailyBrief, aiStatus } =
+  await import('../packages/server/src/core/ai.ts');
 
 before(async () => {
   await connect();
@@ -830,6 +832,122 @@ describe('automation engine', () => {
     assert.equal(listAutomations().filter((a) => a.enabled).length, 0, 'nothing is left enabled');
     // Put them back for any later test.
     execSql('UPDATE automations SET enabled = 1 WHERE built_in = 1');
+  });
+});
+
+
+// ------------------------------------------------------------------- ai
+
+describe('ai layer', () => {
+  const owner = { id: 'u-owner', email: 'o@x', name: 'Owner', role: 'owner',
+    status: 'active', created_at: '', last_login_at: null } as const;
+  const educator = { ...owner, id: 'u-edu', role: 'educator' } as const;
+
+  function familyWithEverything() {
+    const env = validateEnvelope(envelope('registration.created', registration({
+      guardian: { fullName: 'Amina Diallo', email: 'amina.ai@example.invalid', phone: '416-555-0801' },
+      child: { firstName: 'Fatou', ageBand: '3-5 years', dateOfBirth: '2021-05-04' },
+    })));
+    assert.equal(env.ok, true);
+    if (!env.ok) throw new Error('setup failed');
+    return asFamily(ingest(env.value));
+  }
+
+  test('the CRM summarises with no AI configured at all', async () => {
+    const r = familyWithEverything();
+    const s = await summariseFamily(r.familyId, owner as never);
+    assert.ok(s);
+    assert.equal(s!.source, 'rules', 'no provider means the rules answer');
+    assert.equal(s!.insight, null, 'and there is no invented insight');
+    assert.ok(s!.facts.length >= 3, 'the rules summary is genuinely useful on its own');
+    assert.ok(s!.facts.some((f) => /Fatou/.test(f)), 'it names the child');
+  });
+
+  test('SPEC 27: an educator cannot obtain a date of birth through AI', () => {
+    const r = familyWithEverything();
+
+    const asOwner = factsForFamily(r.familyId, owner as never)!;
+    const asEducator = factsForFamily(r.familyId, educator as never)!;
+
+    assert.ok(asOwner.children[0]!.dateOfBirth, 'an owner may see it directly');
+    assert.equal(asEducator.children[0]!.dateOfBirth, undefined,
+      'an educator must not, and the field is absent rather than empty');
+
+    // The whole payload, as a string: a nested leak would slip past a key check.
+    assert.ok(!JSON.stringify(asEducator).includes('2021-05-04'),
+      'the date must not appear anywhere in what AI would receive');
+  });
+
+  test('contact details are reduced to whether they exist', () => {
+    const r = familyWithEverything();
+    const facts = factsForFamily(r.familyId, owner as never)!;
+    const blob = JSON.stringify(facts);
+
+    assert.equal(facts.guardians[0]!.hasEmail, true, 'presence is reported');
+    assert.equal(facts.guardians[0]!.hasPhone, true);
+    assert.ok(!blob.includes('amina.ai@example.invalid'), 'the address itself is never sent');
+    assert.ok(!blob.includes('416-555-0801'), 'nor the phone number');
+  });
+
+  test('note bodies never reach the AI view', () => {
+    const r = familyWithEverything();
+    execSql(
+      "INSERT INTO notes (id, entity_type, entity_id, body, created_at) VALUES (?, 'family', ?, ?, ?)",
+      randomUUID(), r.familyId, 'Candid staff observation that should stay internal', new Date().toISOString());
+
+    const facts = factsForFamily(r.familyId, owner as never)!;
+    assert.equal(facts.noteCount, 1, 'the count is useful');
+    assert.ok(!JSON.stringify(facts).includes('Candid staff observation'),
+      'but what staff actually wrote is not sent anywhere');
+  });
+
+  test('a family marked no-AI is withheld entirely', async () => {
+    const r = familyWithEverything();
+    execSql('UPDATE families SET no_ai = 1 WHERE id = ?', r.familyId);
+
+    const facts = factsForFamily(r.familyId, owner as never)!;
+    assert.ok(facts.withheld, 'the flag on the record wins');
+    assert.equal(facts.children.length, 0, 'nothing about the children is assembled');
+    assert.equal(facts.guardians.length, 0);
+
+    const s = await summariseFamily(r.familyId, owner as never);
+    assert.equal(s!.facts.length, 0, 'and no summary is produced');
+    assert.ok(s!.withheld);
+  });
+
+  test('local-only is treated the same as no-AI', () => {
+    const r = familyWithEverything();
+    execSql('UPDATE families SET local_only = 1 WHERE id = ?', r.familyId);
+    assert.ok(factsForFamily(r.familyId, owner as never)!.withheld);
+  });
+
+  test('the daily brief counts real rows and never invents any', async () => {
+    const b = await dailyBrief(owner as never);
+    assert.ok(Array.isArray(b.facts) && b.facts.length > 0);
+    assert.equal(b.source, 'rules');
+    assert.equal(b.insight, null);
+    for (const f of b.facts) {
+      assert.ok(!/\bmight\b|\bprobably\b|\blikely\b/i.test(f),
+        'a fact line must not hedge: ' + f);
+    }
+  });
+
+  test('status is honest about there being no provider', async () => {
+    const st = await aiStatus();
+    assert.equal(st.configured, false);
+    assert.equal(st.reachable, false);
+    assert.match(st.detail, /works without/i, 'it says the CRM is fine without one');
+  });
+
+  test('the rules summary flags a family nobody can contact', () => {
+    const familyId = randomUUID();
+    const now = new Date().toISOString();
+    execSql(
+      "INSERT INTO families (id, name, status, source, created_at, updated_at) VALUES (?, 'Silent family', 'prospective', 'manual', ?, ?)",
+      familyId, now, now);
+    const lines = ruleSummary(factsForFamily(familyId, owner as never)!);
+    assert.ok(lines.some((l) => /no way to contact/i.test(l)));
+    assert.ok(lines.some((l) => /No child is recorded/i.test(l)));
   });
 });
 

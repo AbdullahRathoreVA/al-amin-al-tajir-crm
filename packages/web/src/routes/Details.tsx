@@ -5,7 +5,7 @@ import { Link, useParams } from '../lib/router.tsx';
 import {
   Panel, Badge, Button, Empty, Spinner, ErrorNote, When, clockTime, toneForStatus, NotMeasured,
 } from '../ui/kit.tsx';
-import { CompletenessPanel, DraftComposer, DraftHistory } from '../ui/Compose.tsx';
+import { CompletenessPanel, DraftComposer, DraftHistory, FamilySummary } from '../ui/Compose.tsx';
 
 interface FamilyDetailData {
   family: Record<string, string | number | null>;
@@ -127,6 +127,7 @@ export function FamilyDetail() {
 
       {tab === 'Overview' && (
         <div className="grid gap-4 lg:grid-cols-2">
+          <div className="lg:col-span-2"><FamilySummary familyId={id} /></div>
           <Panel title="Guardians" pad={false}>
             {d.guardians.length === 0 ? <Empty title="No guardians recorded" /> : (
               <ul>

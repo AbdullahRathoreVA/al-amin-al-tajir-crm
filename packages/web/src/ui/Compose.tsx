@@ -270,3 +270,80 @@ export function DraftHistory({ familyId }: { familyId: string }) {
     </Panel>
   );
 }
+
+// ------------------------------------------------------------- ai summary
+
+interface SummaryData {
+  facts: string[];
+  insight: string | null;
+  source: string;
+  withheld: string | null;
+}
+
+/**
+ * What the CRM knows about a family, in sentences.
+ *
+ * Facts and inference are visually separate and never merged. The facts are
+ * read from records and are always present; the interpretation only appears
+ * when a model is configured, and is labelled as an interpretation.
+ */
+export function FamilySummary({ familyId }: { familyId: string }) {
+  const [data, setData] = useState<SummaryData | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    setData(null); setError(null);
+    api.get<SummaryData>(`/families/${familyId}/summary`)
+      .then((d) => { if (live) setData(d); })
+      .catch((e: unknown) => { if (live) setError(e instanceof Error ? e.message : 'Could not summarise'); });
+    return () => { live = false; };
+  }, [familyId]);
+
+  if (error) return <Panel title="Summary"><ErrorNote error={error} /></Panel>;
+  if (!data) return <Panel title="Summary"><Spinner label="Reading the record" /></Panel>;
+
+  if (data.withheld) {
+    return (
+      <Panel title="Summary">
+        <div className="flex items-start gap-2">
+          <Badge tone="crit">withheld</Badge>
+          <p className="text-[13px]" style={{ color: 'var(--text-muted)' }}>{data.withheld}</p>
+        </div>
+      </Panel>
+    );
+  }
+
+  return (
+    <Panel
+      title="Summary"
+      action={<Badge tone={data.source === 'rules' ? 'neutral' : 'info'}>
+        {data.source === 'rules' ? 'from records' : data.source}
+      </Badge>}
+    >
+      <ul className="flex flex-col gap-1.5">
+        {data.facts.map((f, i) => (
+          <li key={i} className="flex gap-2 text-[13px]">
+            <span aria-hidden style={{ color: 'var(--text-faint)' }}>&bull;</span>
+            <span>{f}</span>
+          </li>
+        ))}
+      </ul>
+
+      {data.insight ? (
+        <div className="mt-3 rounded-lg p-3" style={{ background: 'var(--surface-sunken)' }}>
+          <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide"
+             style={{ color: 'var(--color-teal-400)' }}>
+            Interpretation, not a record
+          </p>
+          <p className="text-[13px] leading-relaxed">{data.insight}</p>
+        </div>
+      ) : (
+        <p className="mt-3 text-[11px]" style={{ color: 'var(--text-faint)' }}>
+          Every line above is read from a record. No AI provider is configured, so nothing here is
+          inferred.
+        </p>
+      )}
+    </Panel>
+  );
+}

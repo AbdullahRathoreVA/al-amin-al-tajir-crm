@@ -24,6 +24,7 @@ import { parseCsv, guessMapping, preview as previewImport, commitImport, IMPORT_
 import { createBackup, listBackups, testRestore, pruneBackups } from './core/backup.ts';
 import { listAutomations, runAutomation, runScheduled, recentRuns, runsFor, disableAll,
   TRIGGERS, type Automation } from './core/automations.ts';
+import { aiStatus, summariseFamily, dailyBrief, factsForFamily } from './core/ai.ts';
 import { ingest } from './ingest/pipeline.ts';
 
 export const router = new Router();
@@ -815,6 +816,36 @@ router.post('/api/v1/automations/disable-all', (c) => {
   logAccess(c.user!.id, 'automation_kill_switch', undefined, undefined, `${n} disabled`);
   return { disabled: n };
 });
+
+
+// ------------------------------------------------------------------- ai
+
+router.get('/api/v1/ai/status', async () => aiStatus());
+
+/**
+ * A family summary. Rules always; a model adds interpretation when one is
+ * configured and reachable. Facts and inference are separate fields so the UI
+ * cannot present a guess as a record.
+ */
+router.get('/api/v1/families/:id/summary', async (c) => {
+  c.require('family:read');
+  // Built from the CALLER's permissions, so an educator cannot obtain a date of
+  // birth by asking the AI for it. (spec 27)
+  const result = await summariseFamily(c.params.id!, c.user!);
+  if (!result) throw notFound('No such family');
+  logAccess(c.user!.id, 'ai_summary', 'family', c.params.id!);
+  return result;
+});
+
+/** What AI would be shown for this family, verbatim. */
+router.get('/api/v1/families/:id/ai-facts', (c) => {
+  c.require('family:read');
+  const facts = factsForFamily(c.params.id!, c.user!);
+  if (!facts) throw notFound('No such family');
+  return facts;
+});
+
+router.get('/api/v1/ai/brief', async (c) => await dailyBrief(c.user!));
 
 // ------------------------------------------------------------------ health
 

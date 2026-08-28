@@ -354,25 +354,54 @@ function DataHealthPanel({ health }: { health: DashboardData['dataHealth'] }) {
 // ----------------------------------------------------------- AI briefing
 
 /**
- * The AI panel states plainly that no model is connected. The alternative —
- * generating a plausible-sounding "briefing" from the same numbers already on
- * screen — would be theatre, and the spec is explicit that AI must communicate
- * understanding rather than the appearance of it. (spec 15 / 218 / 353)
+ * The morning brief.
+ *
+ * The counts are always real. The interpretation only appears when a model is
+ * configured and reachable, and is labelled as interpretation. With no provider
+ * the panel says so rather than dressing the same numbers up as insight.
+ * (spec 15 / 218 / 353)
  */
 function AiBriefing() {
+  const res = useApi<{ facts: string[]; insight: string | null; source: string; generatedAt: string }>('/ai/brief');
+  const status = useApi<{ configured: boolean; reachable: boolean; detail: string; cloud: boolean }>('/ai/status');
+
+  if (res.loading && !res.data) return <Panel title="Briefing"><Spinner label="Reading" /></Panel>;
+  if (res.error) return <Panel title="Briefing"><ErrorNote error={res.error} retry={res.reload} /></Panel>;
+  const d = res.data;
+  if (!d) return null;
+
+  const st = status.data;
   return (
-    <Panel title="AI briefing">
-      <div className="flex items-start gap-2.5">
-        <Badge tone="neutral">not connected</Badge>
-      </div>
-      <p className="mt-2.5 text-[13px] leading-relaxed" style={{ color: 'var(--text-muted)' }}>
-        No AI provider is configured, so there is no briefing to show. Everything above is
-        counted directly from the database, not generated.
-      </p>
-      <p className="mt-2 text-[11px]" style={{ color: 'var(--text-faint)' }}>
-        AI arrives in Phase 4 and will run locally by default. When it does, anything it
-        infers will be labelled as an inference and linked to the records behind it.
-      </p>
+    <Panel
+      title="Briefing"
+      action={
+        <Badge tone={!st?.configured ? 'neutral' : st.reachable ? (st.cloud ? 'warn' : 'ok') : 'crit'}>
+          {!st?.configured ? 'from records' : st.reachable ? (st.cloud ? 'cloud AI' : 'local AI') : 'AI unreachable'}
+        </Badge>
+      }
+    >
+      <ul className="flex flex-col gap-1.5">
+        {d.facts.map((f, i) => (
+          <li key={i} className="flex gap-2 text-[13px]">
+            <span aria-hidden style={{ color: 'var(--text-faint)' }}>&bull;</span>
+            <span>{f}</span>
+          </li>
+        ))}
+      </ul>
+
+      {d.insight ? (
+        <div className="mt-3 rounded-lg p-3" style={{ background: 'var(--surface-sunken)' }}>
+          <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide"
+             style={{ color: 'var(--color-teal-400)' }}>
+            Interpretation, not a record
+          </p>
+          <p className="text-[13px] leading-relaxed">{d.insight}</p>
+        </div>
+      ) : (
+        <p className="mt-3 text-[11px]" style={{ color: 'var(--text-faint)' }}>
+          {st?.detail ?? 'Counted directly from the database. Nothing here is generated.'}
+        </p>
+      )}
     </Panel>
   );
 }
