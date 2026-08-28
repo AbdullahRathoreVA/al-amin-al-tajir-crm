@@ -72,7 +72,7 @@ shares one office address, so applying it there meant one person fumbling their
 password locked out every colleague sitting next to them. Found by hammering the
 real endpoint, not by reading the code.
 
- is trusted for throttling only, never for anything that grants
+`X-Forwarded-For` is trusted for throttling only, never for anything that grants
 access.
 
 ## Input handling
@@ -116,9 +116,9 @@ Stated rather than glossed over:
 - **No encryption at rest.** The SQLite file is plaintext on disk. Use full-disk
   encryption (BitLocker, FileVault). SQLCipher would need a native module, which
   is the same trade-off deferred with Tauri.
-- **No rate limiting beyond login and the body cap.** Sign-in is throttled (see
-  below); the read endpoints are not. That matters the moment this is exposed
-  beyond loopback.
+- **No rate limiting beyond sign-in and the body cap.** Sign-in is throttled
+  (see above); the read endpoints are not. That matters the moment this is
+  exposed beyond loopback.
 - **The website's rate limit is best-effort.** A serverless function has no
   shared memory, so it only slows a burst landing on one warm instance. Real
   rate limiting belongs at the edge.
