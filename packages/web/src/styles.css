@@ -1,0 +1,193 @@
+@import 'tailwindcss';
+
+/* ===========================================================================
+   Tiny Stars Command Center — design tokens.
+
+   Same palette as the public website (cream, indigo ink, coral, teal, star
+   gold) so the two feel related, but inverted: the parent site is parchment by
+   day, the control room is night sky. Warm, calm, spatial.
+
+   Deliberately NOT: neon, cyberpunk, crypto dashboard, gaming HUD. Glow is used
+   once, on the brand motif, and never on data.
+   =========================================================================== */
+
+@theme {
+  --color-cream-50:  #fffdfa;
+  --color-cream-100: #fdf8f2;
+  --color-cream-200: #f7efe4;
+  --color-cream-300: #eee2d2;
+  --color-cream-400: #ddcbb6;
+  --color-sand-500:  #b3a08a;
+  --color-sand-600:  #8a7965;
+
+  --color-ink-950: #0e0d1c;
+  --color-ink-900: #17162b;
+  --color-ink-800: #22203c;
+  --color-ink-700: #33314f;
+  --color-ink-600: #4a4767;
+  --color-ink-500: #6a6785;
+  --color-ink-400: #8f8ca6;
+
+  --color-coral-100: #ffe0d6;
+  --color-coral-300: #ff9f80;
+  --color-coral-500: #f4703f;
+  --color-coral-600: #dd5a2a;
+
+  --color-teal-100: #d5ebe6;
+  --color-teal-400: #4fa896;
+  --color-teal-600: #2d7a6c;
+
+  --color-gold-200: #ffe9b0;
+  --color-gold-400: #f2be4c;
+  --color-gold-600: #c9922a;
+
+  --color-ok-400:   #5cb87c;
+  --color-ok-600:   #2f7d4a;
+  --color-warn-400: #e5a93f;
+  --color-warn-600: #a86a12;
+  --color-crit-400: #e8735f;
+  --color-crit-600: #b8451d;
+
+  --font-sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: ui-monospace, 'Cascadia Code', 'SF Mono', Menlo, monospace;
+
+  --radius-panel: 14px;
+}
+
+/* Semantic surface tokens, swapped by theme. Components only ever reference
+   these, never a raw palette value, so the theme flip is one place. */
+:root {
+  --surface:        var(--color-cream-100);
+  --surface-raised: var(--color-cream-50);
+  --surface-sunken: var(--color-cream-200);
+  --surface-inset:  var(--color-cream-300);
+  --text:           var(--color-ink-900);
+  --text-muted:     var(--color-ink-500);
+  --text-faint:     var(--color-ink-400);
+  --line:           color-mix(in oklab, var(--color-ink-900) 12%, transparent);
+  --line-strong:    color-mix(in oklab, var(--color-ink-900) 22%, transparent);
+  --accent:         var(--color-coral-600);
+  --accent-text:    #fff;
+  --sky-1: #f7efe4;
+  --sky-2: #fdf8f2;
+  color-scheme: light;
+}
+
+html.dark {
+  --surface:        var(--color-ink-950);
+  --surface-raised: var(--color-ink-900);
+  --surface-sunken: #0a0917;
+  --surface-inset:  var(--color-ink-800);
+  --text:           var(--color-cream-100);
+  --text-muted:     #a8a5bd;
+  --text-faint:     var(--color-ink-400);
+  --line:           color-mix(in oklab, var(--color-cream-100) 12%, transparent);
+  --line-strong:    color-mix(in oklab, var(--color-cream-100) 24%, transparent);
+  --accent:         var(--color-coral-500);
+  --accent-text:    #1a0f0a;
+  --sky-1: #0e0d1c;
+  --sky-2: #17162b;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root { height: 100%; }
+
+body {
+  margin: 0;
+  background: var(--surface);
+  color: var(--text);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  /* iOS: stop the rubber-band scroll revealing a white void behind the app. */
+  overscroll-behavior: none;
+}
+
+/* Focus is always visible. Operators work this app by keyboard. (spec 246) */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+::selection { background: var(--color-coral-300); color: #17162b; }
+
+/* Scrollbars, quietened rather than hidden - a hidden scrollbar hides position. */
+* { scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; }
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-thumb {
+  background: var(--line-strong); border-radius: 6px;
+  border: 3px solid transparent; background-clip: content-box;
+}
+
+@utility panel {
+  background: var(--surface-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-panel);
+}
+
+@utility tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Every animation in the app is written to be switchable off wholesale. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ------------------------------------------------- 3D constellation labels
+   The labels are DOM, not sprites: crisp at any DPI, translatable, and
+   focusable, so the map is fully operable with a keyboard and a screen reader
+   even though the geometry behind it is not. */
+
+.cst-layer {
+  position: absolute; inset: 0;
+  pointer-events: none;
+}
+
+.cst-label {
+  position: absolute; top: 0; left: 0;
+  display: flex; flex-direction: column; align-items: center; gap: 1px;
+  padding: 5px 9px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: color-mix(in oklab, var(--surface-raised) 88%, transparent);
+  backdrop-filter: blur(6px);
+  color: var(--text);
+  font: inherit; line-height: 1.1;
+  white-space: nowrap;
+  pointer-events: auto;
+  cursor: pointer;
+  transition: border-color .16s, background .16s, box-shadow .16s;
+}
+.cst-label:hover, .cst-label.is-hover, .cst-label:focus-visible {
+  border-color: var(--line-strong);
+  background: var(--surface-raised);
+  box-shadow: 0 6px 22px rgb(0 0 0 / .28);
+}
+.cst-label__n {
+  font-variant-numeric: tabular-nums;
+  font-size: 15px; font-weight: 650;
+}
+.cst-label__t {
+  font-size: 10.5px; font-weight: 550;
+  letter-spacing: .03em; text-transform: uppercase;
+  color: var(--text-muted);
+}
+.cst-label[data-severity='critical'] .cst-label__n { color: var(--color-crit-400); }
+.cst-label[data-severity='warning']  .cst-label__n { color: var(--color-warn-400); }
+.cst-label[data-severity='ok']       .cst-label__n { color: var(--color-teal-400); }
+.cst-label[data-severity='idle']     .cst-label__n { color: var(--text-faint); }
+
+.cst-stage {
+  position: relative;
+  background:
+    radial-gradient(120% 90% at 50% 8%, color-mix(in oklab, var(--color-gold-400) 7%, transparent), transparent 62%),
+    linear-gradient(180deg, var(--sky-2), var(--sky-1));
+}

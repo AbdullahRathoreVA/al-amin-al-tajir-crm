@@ -1,0 +1,16 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+*.log
+data/
+!data/.gitkeep
+backups/
+.DS_Store
+Thumbs.db
+*.db
+*.db-wal
+*.db-shm
+.vite/
+coverage/

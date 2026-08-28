@@ -1,0 +1,31 @@
+{
+  "name": "al-amin-al-tajir-crm",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Tiny Stars Command Center — private, local-first childcare operations system.",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "dev:server": "node --disable-warning=ExperimentalWarning --watch packages/server/src/main.ts",
+    "dev:web": "npm run dev -w @crm/web",
+    "build": "npm run build -w @crm/web",
+    "start": "node --disable-warning=ExperimentalWarning packages/server/src/main.ts",
+    "db:migrate": "node --disable-warning=ExperimentalWarning packages/server/src/db/migrate.ts",
+    "db:seed": "node --disable-warning=ExperimentalWarning packages/server/src/seed/demo.ts",
+    "db:reset": "node --disable-warning=ExperimentalWarning packages/server/src/seed/reset.ts",
+    "emit:contract": "node --disable-warning=ExperimentalWarning packages/shared/src/emit.ts",
+    "test": "node --disable-warning=ExperimentalWarning --test tests/*.test.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "scan:secrets": "node scripts/scan-secrets.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.3",
+    "typescript": "^5.7.2"
+  }
+}
