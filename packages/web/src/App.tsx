@@ -7,6 +7,7 @@ import { Dashboard } from './routes/Dashboard.tsx';
 import { Families, Leads, Tours, Registrations, Tasks } from './routes/Lists.tsx';
 import { FamilyDetail, RegistrationDetail } from './routes/Details.tsx';
 import { System } from './routes/System.tsx';
+import { Analytics } from './routes/Analytics.tsx';
 
 const NAV = [
   { to: '/', label: 'Dashboard', glyph: '◇' },
@@ -15,6 +16,7 @@ const NAV = [
   { to: '/tours', label: 'Tours', glyph: '◷' },
   { to: '/registrations', label: 'Registrations', glyph: '≡' },
   { to: '/tasks', label: 'Tasks', glyph: '✓' },
+  { to: '/analytics', label: 'Analytics', glyph: '◔' },
   { to: '/system', label: 'System', glyph: '⚙' },
 ];
 
@@ -79,8 +81,11 @@ function Login({ onSignedIn }: { onSignedIn: () => void }) {
           </p>
         </div>
 
-        <label className="mb-1 block text-[12px] font-medium" htmlFor="email">Email</label>
-        <input id="email" type="email" required autoComplete="username" autoFocus
+        {/* type="text", not "email": accounts may be a plain username. The
+            browser would otherwise refuse to submit "tinystarsCANADA". */}
+        <label className="mb-1 block text-[12px] font-medium" htmlFor="email">Email or username</label>
+        <input id="email" type="text" required autoComplete="username" autoFocus
+               autoCapitalize="none" spellCheck={false}
                value={email} onChange={(e) => setEmail(e.target.value)}
                className={`${field} mb-3`} style={fieldStyle} />
 
@@ -239,6 +244,7 @@ function Routes({ userName }: { userName: string }) {
   if (path === '/registrations') return <Registrations />;
   if (path.startsWith('/registrations/')) return <RegistrationDetail />;
   if (path === '/tasks') return <Tasks />;
+  if (path === '/analytics') return <Analytics />;
   if (path === '/system' || path === '/programs') return <System />;
   return (
     <Panel><div className="py-8 text-center">

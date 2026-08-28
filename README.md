@@ -49,6 +49,26 @@ so the app is same-origin in development exactly as it is in production.
 
 Password for all four: `demo1234`. They exist only in demo mode.
 
+### Real accounts
+
+Managed from the command line. The password is **never** an argument — arguments
+land in shell history, in `ps` output, and in terminal recordings. It is read
+from a hidden prompt, or from `CRM_NEW_PASSWORD` when scripting.
+
+```bash
+npm run user:list
+npm run user:create -- <login> "<Full Name>" <role>    # prompts for the password
+npm run user:password -- <login>                       # rotate; signs out every device
+npm run user:suspend -- <login>
+npm run user:activate -- <login>
+```
+
+`<login>` may be an email address or a plain username, and is matched
+case-insensitively. `<role>` is one of `owner`, `director`, `admissions`,
+`educator`, `accounting`, `readonly`.
+
+Delete every `@demo.local` account before this holds real data.
+
 ---
 
 ## What is actually built

@@ -15,6 +15,7 @@ import {
   toursToday, overdueFollowUps,
 } from './core/queries.ts';
 import { validateEnvelope } from '@crm/shared';
+import { analyticsBundle, isWindow, type Window } from './core/analytics.ts';
 import { ingest } from './ingest/pipeline.ts';
 
 export const router = new Router();
@@ -543,6 +544,16 @@ router.get('/api/v1/meta', (c) => ({
   contractVersion: 1,
 }));
 
+// ------------------------------------------------------------- analytics
+
+router.get('/api/v1/analytics', (c) => {
+  // Website behaviour is business data, not family data, so it sits behind
+  // audit:read rather than one of the family capabilities.
+  c.require('audit:read');
+  const w = c.query.get('window');
+  return analyticsBundle(isWindow(w) ? (w as Window) : '30d');
+});
+
 // ---------------------------------------------------------------- ingest
 
 /**
@@ -567,8 +578,11 @@ router.post('/api/v1/ingest', (c) => {
   const parsed = validateEnvelope(c.body);
   if (!parsed.ok) throw badRequest('Event failed validation', parsed.errors);
 
-  const result = ingest(parsed.value);
-  return result;
+  // Most edges add a coarse country header. Country only: never a city, never
+  // a coordinate, never an IP address.
+  const geo = c.req.headers['x-vercel-ip-country'] ?? c.req.headers['cf-ipcountry'];
+  const country = (Array.isArray(geo) ? geo[0] : geo)?.slice(0, 2).toUpperCase();
+  return ingest(parsed.value, country ? { country } : {});
 }, { anonymous: true });
 
 /** Lets the website check it is wired up correctly without sending data. */

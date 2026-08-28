@@ -16,8 +16,9 @@ import { findFamilyMatches, findChildInFamily, type FamilyMatch } from '../core/
 import { indexEntity } from '../core/search.ts';
 import { notify, createTask } from '../core/notify.ts';
 import type {
-  EventEnvelope, RegistrationData, TourRequestData, ContactData, GuardianInput, ChildInput,
+  EventEnvelope, RegistrationData, TourRequestData, ContactData, GuardianInput, ChildInput, AnalyticsBatch,
 } from '@crm/shared';
+import { ingestAnalytics, type AnalyticsResult } from './analytics.ts';
 
 export interface IngestResult {
   status: 'processed' | 'duplicate';
@@ -38,12 +39,12 @@ const INTEGRATION: Actor = { type: 'integration', id: null, source: 'website' };
 // --------------------------------------------------------------- idempotency
 
 /** Returns the earlier result if this eventId was already handled. (spec 31) */
-function previousResult(eventId: string): IngestResult | null {
+function previousResult(eventId: string): IngestResult | AnalyticsResult | null {
   const row = one<{ status: string; result_json: string | null }>(
     'SELECT status, result_json FROM ingest_events WHERE event_id = ?', eventId);
   if (!row || row.status !== 'processed' || !row.result_json) return null;
   try {
-    return { ...(JSON.parse(row.result_json) as IngestResult), status: 'duplicate' };
+    return { ...(JSON.parse(row.result_json) as IngestResult | AnalyticsResult), status: 'duplicate' };
   } catch { return null; }
 }
 
@@ -233,7 +234,7 @@ function flagForReview(familyId: string, candidates: FamilyMatch[], actor: Actor
 
 // ---------------------------------------------------------------- entrypoints
 
-export function ingest(env: EventEnvelope): IngestResult {
+export function ingest(env: EventEnvelope, meta: { country?: string } = {}): IngestResult | AnalyticsResult {
   const prior = previousResult(env.eventId);
   if (prior) return prior;
 
@@ -254,6 +255,16 @@ export function ingest(env: EventEnvelope): IngestResult {
   }
 
   try {
+    // Analytics takes its own path: it is high-volume, creates no family, and
+    // must never raise a task, an alert or a Sheets row. Nobody needs a
+    // notification because somebody looked at a page.
+    if (env.type === 'web.analytics') {
+      const result = ingestAnalytics(env.eventId, env.data as AnalyticsBatch, meta.country);
+      run(`UPDATE ingest_events SET status='processed', result_json=?, processed_at=? WHERE event_id=?`,
+        JSON.stringify(result), nowIso(), env.eventId);
+      return result;
+    }
+
     const result = tx(() => {
       switch (env.type) {
         case 'registration.created':

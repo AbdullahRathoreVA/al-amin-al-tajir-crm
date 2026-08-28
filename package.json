@@ -22,7 +22,12 @@
     "emit:contract": "node --disable-warning=ExperimentalWarning packages/shared/src/emit.ts",
     "test": "node --disable-warning=ExperimentalWarning --test tests/*.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "scan:secrets": "node scripts/scan-secrets.mjs"
+    "scan:secrets": "node scripts/scan-secrets.mjs",
+    "user:list": "node --disable-warning=ExperimentalWarning packages/server/src/seed/users.ts list",
+    "user:create": "node --disable-warning=ExperimentalWarning packages/server/src/seed/users.ts create",
+    "user:password": "node --disable-warning=ExperimentalWarning packages/server/src/seed/users.ts password",
+    "user:suspend": "node --disable-warning=ExperimentalWarning packages/server/src/seed/users.ts suspend",
+    "user:activate": "node --disable-warning=ExperimentalWarning packages/server/src/seed/users.ts activate"
   },
   "devDependencies": {
     "@types/node": "^24.13.3",

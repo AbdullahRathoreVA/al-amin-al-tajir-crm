@@ -49,6 +49,17 @@ const registration = (over: Record<string, unknown> = {}) => ({
 
 const countRows = (sql: string, ...p: string[]) => Number(one<{ n: number }>(sql, ...p)?.n ?? 0);
 
+/**
+ * ingest() returns a union now that analytics shares the entry point. Every
+ * family-shaped test wants the family branch, so narrow once here and fail
+ * loudly rather than letting `undefined` masquerade as a passing assertion.
+ */
+type FamilyIngest = Extract<ReturnType<typeof ingest>, { createdFamily: boolean }>;
+function asFamily(r: ReturnType<typeof ingest>): FamilyIngest {
+  assert.ok('createdFamily' in r, `expected a family result, got ${JSON.stringify(r)}`);
+  return r as FamilyIngest;
+}
+
 // ---------------------------------------------------------------- validation
 
 describe('contract validation', () => {
@@ -128,7 +139,7 @@ describe('registration ingestion', () => {
     assert.equal(env.ok, true);
     if (!env.ok) return;
 
-    const r = ingest(env.value);
+    const r = asFamily(ingest(env.value));
     assert.equal(r.status, 'processed');
     assert.equal(r.createdFamily, true);
     assert.ok(r.familyId && r.childId && r.leadId && r.registrationId);
@@ -157,10 +168,10 @@ describe('registration ingestion', () => {
     if (!env.ok) return;
 
     const before = countRows('SELECT COUNT(*) n FROM families');
-    const first = ingest(env.value);
+    const first = asFamily(ingest(env.value));
     const afterFirst = countRows('SELECT COUNT(*) n FROM families');
 
-    const second = ingest(env.value);
+    const second = asFamily(ingest(env.value));
     const afterSecond = countRows('SELECT COUNT(*) n FROM families');
 
     assert.equal(first.status, 'processed');
@@ -181,7 +192,7 @@ describe('registration ingestion', () => {
       child: { firstName: 'Otto', ageBand: '3-5 years' },
     })));
     assert.equal(first.ok, true); if (!first.ok) return;
-    const a = ingest(first.value);
+    const a = asFamily(ingest(first.value));
 
     // Same guardian email, a second child. This is a sibling, not a duplicate.
     const second = validateEnvelope(envelope('registration.created', registration({
@@ -189,7 +200,7 @@ describe('registration ingestion', () => {
       child: { firstName: 'Petra', ageBand: 'Under 12 months' },
     })));
     assert.equal(second.ok, true); if (!second.ok) return;
-    const b = ingest(second.value);
+    const b = asFamily(ingest(second.value));
 
     assert.equal(b.createdFamily, false, 'an exact email match must link, not create');
     assert.equal(b.familyId, a.familyId);
@@ -205,7 +216,7 @@ describe('registration ingestion', () => {
       child: { firstName: 'Elin', ageBand: '3-5 years' },
     })));
     assert.equal(one1.ok, true); if (!one1.ok) return;
-    const a = ingest(one1.value);
+    const a = asFamily(ingest(one1.value));
 
     // Same surname, different email AND different phone: not enough to merge.
     const two = validateEnvelope(envelope('registration.created', registration({
@@ -213,7 +224,7 @@ describe('registration ingestion', () => {
       child: { firstName: 'Nils', ageBand: '5-6 years' },
     })));
     assert.equal(two.ok, true); if (!two.ok) return;
-    const b = ingest(two.value);
+    const b = asFamily(ingest(two.value));
 
     assert.equal(b.createdFamily, true, 'a weak match must never auto-merge');
     assert.notEqual(b.familyId, a.familyId);
@@ -233,7 +244,7 @@ describe('registration ingestion', () => {
       completedSteps: 2, totalSteps: 5,
     })));
     assert.equal(env.ok, true); if (!env.ok) return;
-    const r = ingest(env.value);
+    const r = asFamily(ingest(env.value));
 
     const reg = one<{ status: string }>('SELECT status FROM registrations WHERE id = ?', r.registrationId!);
     assert.equal(reg?.status, 'incomplete');
@@ -250,7 +261,7 @@ describe('registration ingestion', () => {
       child: { firstName: 'Sven', ageBand: '5-6 years' },
     })));
     assert.equal(env.ok, true); if (!env.ok) return;
-    const r = ingest(env.value);
+    const r = asFamily(ingest(env.value));
 
     const events = many<{ summary: string }>(
       'SELECT summary FROM events WHERE entity_id = ? OR entity_id = ?', r.familyId, r.registrationId!);
@@ -274,7 +285,7 @@ describe('tour requests', () => {
       preferredDates: ['2026-09-14', '2026-09-15'],
     }));
     assert.equal(env.ok, true); if (!env.ok) return;
-    const r = ingest(env.value);
+    const r = asFamily(ingest(env.value));
 
     const tour = one<{ status: string; notes: string }>('SELECT status, notes FROM tours WHERE id = ?', r.tourId!);
     assert.equal(tour?.status, 'requested', 'a parent preference is not a confirmed booking');

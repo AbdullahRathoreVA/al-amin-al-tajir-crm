@@ -22,6 +22,8 @@ export const EVENT_TYPES = [
   'tour.requested',
   'contact.created',
   'waitlist.requested',
+  // Website behaviour, batched. Carries no personal data by construction.
+  'web.analytics',
   // Reserved — Phase 10. Declared, deliberately not implemented.
   'call.received',
   'voice.summary',
@@ -236,6 +238,112 @@ export function validateTourRequest(raw: unknown): Validated<TourRequestData> {
   return errs.length ? { ok: false, errors: errs } : { ok: true, value };
 }
 
+// ------------------------------------------------------------- web analytics
+
+export const DEVICES = ['mobile', 'tablet', 'desktop'] as const;
+
+export interface AnalyticsHit {
+  /** Event name from the website's allow-list, e.g. 'page_view'. */
+  name: string;
+  path?: string;
+  /** Non-identifying, allow-listed values only. */
+  props?: Record<string, string | number | boolean>;
+  /** Milliseconds the tab was visible and active for this hit. */
+  engagedMs?: number;
+  at: string;
+}
+
+export interface AnalyticsBatch {
+  /** Random, per tab, dies with the tab. Not a cookie, not cross-visit. */
+  sessionId: string;
+  landingPath?: string;
+  /** Host only. A full referrer URL can carry a search query. */
+  referrerHost?: string;
+  utmSource?: string;
+  utmMedium?: string;
+  utmCampaign?: string;
+  device?: (typeof DEVICES)[number];
+  hits: AnalyticsHit[];
+}
+
+const MAX_HITS = 50;
+/** Anything outside this is dropped rather than truncated: a value that needed
+ *  truncating is a value we did not expect, and free text is exactly the risk. */
+const SAFE_VALUE = /^[\w \-.:/?=&%+]{0,80}$/;
+
+export function validateAnalytics(raw: unknown): Validated<AnalyticsBatch> {
+  const errs: ValidationError[] = [];
+  const o = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>;
+
+  const sessionId = str(o.sessionId, 'sessionId', errs, { required: true, max: 64 });
+  if (sessionId && !/^[A-Za-z0-9_-]{8,64}$/.test(sessionId)) {
+    errs.push({ path: 'sessionId', message: 'must be an opaque token' });
+  }
+
+  const value: AnalyticsBatch = { sessionId: sessionId ?? '', hits: [] };
+
+  const landing = str(o.landingPath, 'landingPath', errs, { max: 200 });
+  if (landing) value.landingPath = landing;
+
+  // Host only. If a full URL arrives, keep its host and discard the rest.
+  const ref = str(o.referrerHost, 'referrerHost', errs, { max: 200 });
+  if (ref) {
+    const host = ref.replace(/^[a-z]+:\/\//i, '').split('/')[0]?.split('?')[0] ?? '';
+    if (host && /^[a-z0-9.-]{1,120}$/i.test(host)) value.referrerHost = host.toLowerCase();
+  }
+
+  const utmSource = str(o.utmSource, 'utmSource', errs, { max: 80 });
+  if (utmSource && SAFE_VALUE.test(utmSource)) value.utmSource = utmSource;
+  const utmMedium = str(o.utmMedium, 'utmMedium', errs, { max: 80 });
+  if (utmMedium && SAFE_VALUE.test(utmMedium)) value.utmMedium = utmMedium;
+  const utmCampaign = str(o.utmCampaign, 'utmCampaign', errs, { max: 80 });
+  if (utmCampaign && SAFE_VALUE.test(utmCampaign)) value.utmCampaign = utmCampaign;
+
+  const device = str(o.device, 'device', errs, { oneOf: DEVICES });
+  if (device) value.device = device as AnalyticsBatch['device'];
+
+  if (!Array.isArray(o.hits)) {
+    errs.push({ path: 'hits', message: 'must be an array' });
+    return { ok: false, errors: errs };
+  }
+
+  for (const [i, rawHit] of o.hits.slice(0, MAX_HITS).entries()) {
+    const h = (typeof rawHit === 'object' && rawHit !== null ? rawHit : {}) as Record<string, unknown>;
+    const name = str(h.name, `hits[${i}].name`, errs, { required: true, max: 60 });
+    if (!name || !/^[a-z0-9_]+$/.test(name)) {
+      if (name) errs.push({ path: `hits[${i}].name`, message: 'must be a lowercase event name' });
+      continue;
+    }
+    const at = str(h.at, `hits[${i}].at`, errs, { max: 40 });
+    const hit: AnalyticsHit = { name, at: at && isIsoDate(at) ? at : new Date().toISOString() };
+
+    const path = str(h.path, `hits[${i}].path`, errs, { max: 200 });
+    if (path) hit.path = path;
+
+    if (typeof h.engagedMs === 'number' && Number.isFinite(h.engagedMs)) {
+      // Cap at an hour. A tab left open overnight is not engagement, and an
+      // uncapped number would quietly poison every average on the dashboard.
+      hit.engagedMs = Math.max(0, Math.min(3_600_000, Math.trunc(h.engagedMs)));
+    }
+
+    if (typeof h.props === 'object' && h.props !== null) {
+      const props: Record<string, string | number | boolean> = {};
+      for (const [k, v] of Object.entries(h.props as Record<string, unknown>).slice(0, 10)) {
+        if (!/^[a-z_][a-z0-9_]{0,30}$/i.test(k)) continue;
+        if (typeof v === 'number' && Number.isFinite(v)) props[k] = v;
+        else if (typeof v === 'boolean') props[k] = v;
+        else if (typeof v === 'string' && SAFE_VALUE.test(v)) props[k] = v;
+        // Anything else is dropped. Free text never reaches storage.
+      }
+      if (Object.keys(props).length) hit.props = props;
+    }
+    value.hits.push(hit);
+  }
+
+  if (!value.hits.length) errs.push({ path: 'hits', message: 'contained no usable events' });
+  return errs.length ? { ok: false, errors: errs } : { ok: true, value };
+}
+
 export function validateContact(raw: unknown): Validated<ContactData> {
   const errs: ValidationError[] = [];
   const o = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>;
@@ -271,6 +379,7 @@ export function validateEnvelope(raw: unknown): Validated<EventEnvelope> {
     case 'tour.requested':
     case 'waitlist.requested':  data = validateTourRequest(o.data); break;
     case 'contact.created':     data = validateContact(o.data); break;
+    case 'web.analytics':       data = validateAnalytics(o.data); break;
     default:
       return { ok: false, errors: [{ path: 'type', message: `event type '${type}' is declared but not implemented yet` }] };
   }
