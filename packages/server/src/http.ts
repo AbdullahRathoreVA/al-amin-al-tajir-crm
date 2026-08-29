@@ -27,6 +27,10 @@ export const unauthorized = (m = 'Sign in required') => new HttpError(401, m);
 export const forbidden = (m = 'You do not have permission to do that') => new HttpError(403, m);
 export const notFound = (m = 'Not found') => new HttpError(404, m);
 
+/** 410, not 404. The record existed; it does not any more. That is a different
+ *  fact for whoever followed the link, and worth spending a status code on. */
+export const gone = (m: string, d?: unknown) => new HttpError(410, m, d);
+
 export interface Ctx {
   req: IncomingMessage;
   res: ServerResponse;

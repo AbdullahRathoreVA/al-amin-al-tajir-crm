@@ -126,3 +126,32 @@ export function logAccess(
     newId(), userId, action, entityType ?? null, entityId ?? null, detail ?? null, nowIso(),
   );
 }
+
+/**
+ * What the append-only log still remembers about a record that is no longer in
+ * its table.
+ *
+ * The log outlives the row it describes, which is the whole point of it being
+ * append-only. So when a lookup misses, there are two very different answers:
+ * "that identifier was never real" and "that was deleted on Tuesday". Returning
+ * "not found" for both sends someone hunting for a broken link when the honest
+ * answer is that the record is gone and the log knows exactly when.
+ *
+ * This is not hypothetical. A task in the attention radar outlived the
+ * registration it pointed at, and following it reported "No such registration".
+ */
+export function historyOf(
+  entityType: string,
+  entityId: string,
+): { created: string; last: string; lastSummary: string | null } | null {
+  const row = one<{ created: string | null; last: string | null; lastSummary: string | null }>(
+    `SELECT MIN(created_at) AS created,
+            MAX(created_at) AS last,
+            (SELECT summary FROM events WHERE entity_type = ? AND entity_id = ?
+              ORDER BY seq DESC LIMIT 1) AS lastSummary
+       FROM events WHERE entity_type = ? AND entity_id = ?`,
+    entityType, entityId, entityType, entityId,
+  );
+  if (!row?.created || !row.last) return null;
+  return { created: row.created, last: row.last, lastSummary: row.lastSummary };
+}

@@ -12,7 +12,8 @@ import { connect, one, many, run, tx, getDb } from '../db/index.ts';
 import { config } from '../core/config.ts';
 import { migrateUp, applied, loadMigrations } from '../db/migrate.ts';
 import { nowIso } from '../core/util.ts';
-import { newestBackup } from '../core/backup.ts';
+import { newestBackup, createBackup } from '../core/backup.ts';
+import { recordEvent, SYSTEM } from '../core/events.ts';
 
 interface Finding { level: 'blocker' | 'warning' | 'ok'; message: string; fix?: string }
 
@@ -125,12 +126,17 @@ export function preflight(): Finding[] {
   } else f.push({ level: 'ok', message: `${stages} lead stages, ${programs} programs` });
 
   // --- leftovers ----------------------------------------------------------
-  const demoFamilies = count(
-    `SELECT COUNT(*) n FROM guardians WHERE email LIKE '%@example.invalid'`);
+  // Count only what harden would actually remove. Counting the families it now
+  // protects would block the preflight forever, telling you to run a command
+  // that correctly refuses to touch them.
+  const kept = websiteSourcedFamilyIds();
+  const demoFamilies = many<{ family_id: string }>(
+    `SELECT DISTINCT family_id FROM guardians WHERE email LIKE '%@example.invalid'`)
+    .filter((g) => !kept.has(g.family_id)).length;
   if (demoFamilies > 0) {
     f.push({
       level: 'blocker',
-      message: `${demoFamilies} synthetic guardian record(s) remain (example.invalid addresses).`,
+      message: `${demoFamilies} synthetic family record(s) remain (example.invalid addresses).`,
       fix: 'Run: npm run prod:harden',
     });
   } else f.push({ level: 'ok', message: 'No synthetic family data' });
@@ -161,13 +167,77 @@ export function preflight(): Finding[] {
   return f;
 }
 
+/**
+ * Every family a real parent submitted through the website, whatever address
+ * they typed into the form.
+ *
+ * This exists because the `@example.invalid` rule below is a guess about intent
+ * and this is a fact about origin. On 2026-08-28 a real website registration
+ * was submitted with an `@example.invalid` address; `harden --force` ran 55
+ * seconds later, matched it, and deleted the family, the child, the lead and
+ * both registrations. Only the append-only event log survived to prove they had
+ * ever existed.
+ *
+ * A pattern-match on an email address must never outrank the record of how a
+ * row got here. If the website put it there, a person put it there.
+ */
+function websiteSourcedFamilyIds(): Set<string> {
+  // `source = 'website'` is NOT the test, however much it reads like one: the
+  // demo seeder stamps its fabricated families with exactly that. What cannot
+  // be fabricated is `source_id`, which holds the eventId of the signed request
+  // that created the row — and `ingest_events` is the ledger of events actually
+  // received and verified. The seeder writes NULL there, because no event ever
+  // arrived. So: joinable to ingest_events means a real parent pressed submit.
+  const rows = many<{ id: string }>(
+    `SELECT id AS id        FROM families      WHERE source_id IN (SELECT event_id FROM ingest_events)
+      UNION SELECT family_id FROM registrations WHERE source_id IN (SELECT event_id FROM ingest_events)
+      UNION SELECT family_id FROM leads         WHERE source_id IN (SELECT event_id FROM ingest_events)`);
+  return new Set(rows.map((r) => r.id));
+}
+
+/**
+ * Tasks and notifications point at records by (type, id) with no foreign key,
+ * deliberately: a task may outlive the thing it refers to and still be worth
+ * reading. But when the target is deleted outright, what is left is a link that
+ * 404s — which is how the deletion above was discovered, from a task in the
+ * attention radar that led to "No such registration".
+ *
+ * Deleting the row and orphaning its inbound links is not finishing the job.
+ */
+function dependentIdsOf(familyId: string): { type: string; id: string }[] {
+  const out: { type: string; id: string }[] = [{ type: 'family', id: familyId }];
+  for (const [type, table] of [
+    ['child', 'children'], ['lead', 'leads'], ['tour', 'tours'],
+    ['registration', 'registrations'], ['waitlist', 'waitlist'], ['guardian', 'guardians'],
+  ] as const) {
+    for (const r of many<{ id: string }>(`SELECT id FROM ${table} WHERE family_id = ?`, familyId)) {
+      out.push({ type, id: r.id });
+    }
+  }
+  return out;
+}
+
 /** Destructive. Removes every demo account and every synthetic family. */
 export function harden(force: boolean): void {
   const demoUsers = many<{ id: string; email: string }>(
     `SELECT id, email FROM users WHERE email LIKE '%@demo.local'`);
-  const demoFamilies = many<{ id: string; name: string }>(
-    `SELECT DISTINCT f.id, f.name FROM families f JOIN guardians g ON g.family_id = f.id
-      WHERE g.email LIKE '%@example.invalid'`);
+  const candidates = many<{ id: string; name: string; emails: string }>(
+    `SELECT f.id, f.name, GROUP_CONCAT(DISTINCT g.email) AS emails
+       FROM families f JOIN guardians g ON g.family_id = f.id
+      WHERE g.email LIKE '%@example.invalid'
+      GROUP BY f.id, f.name`);
+
+  const protectedIds = websiteSourcedFamilyIds();
+  const demoFamilies = candidates.filter((f) => !protectedIds.has(f.id));
+  const spared = candidates.filter((f) => protectedIds.has(f.id));
+
+  // Say what was protected even when there is nothing to delete. Silence here
+  // reads as "there was nothing matching", which is a different fact.
+  if (spared.length) {
+    console.log(`Protected ${spared.length} family record(s) that came from the website:`);
+    for (const f of spared) console.log(`  keep    ${f.name}  (${f.emails})`);
+    console.log('');
+  }
 
   if (!demoUsers.length && !demoFamilies.length) {
     console.log('Nothing to remove. No demo accounts and no synthetic families.');
@@ -175,18 +245,44 @@ export function harden(force: boolean): void {
   }
 
   console.log(`This will permanently delete:`);
-  console.log(`  ${demoUsers.length} account(s): ${demoUsers.map((u) => u.email).join(', ') || 'none'}`);
-  console.log(`  ${demoFamilies.length} family record(s) and everything attached to them`);
+  for (const u of demoUsers) console.log(`  account  ${u.email}`);
+  // Name them. A count cannot be sanity-checked by the person typing --force.
+  for (const f of demoFamilies) console.log(`  family   ${f.name}  (${f.emails})`);
   if (!force) {
     console.log('\nNothing was deleted. Re-run with --force to go ahead:');
     console.log('  npm run prod:harden -- --force');
     return;
   }
 
+  // Before, not after. A backup taken after the delete preserves the delete.
+  let safety = '(none)';
+  try {
+    safety = createBackup().path;
+    console.log(`\nBackup taken first: ${safety}`);
+  } catch (err) {
+    console.error('\nRefusing to delete: the safety backup failed.');
+    console.error(err instanceof Error ? err.message : String(err));
+    process.exitCode = 1;
+    return;
+  }
+
+  let orphans = 0;
   tx(() => {
     for (const u of demoUsers) run('DELETE FROM users WHERE id = ?', u.id);
-    // Cascades handle guardians, children, leads, tours, registrations, waitlist.
-    for (const f of demoFamilies) run('DELETE FROM families WHERE id = ?', f.id);
+    for (const f of demoFamilies) {
+      const deps = dependentIdsOf(f.id);
+      // Cascades handle guardians, children, leads, tours, registrations, waitlist.
+      run('DELETE FROM families WHERE id = ?', f.id);
+      for (const d of deps) {
+        orphans += Number(run('DELETE FROM tasks WHERE related_type = ? AND related_id = ?', d.type, d.id).changes ?? 0);
+        orphans += Number(run('DELETE FROM notifications WHERE link_type = ? AND link_id = ?', d.type, d.id).changes ?? 0);
+      }
+      recordEvent({
+        entityType: 'family', entityId: f.id, type: 'deleted', actor: SYSTEM,
+        summary: `Family "${f.name}" removed by prod:harden as synthetic data`,
+        before: { name: f.name, guardianEmails: f.emails }, after: null,
+      });
+    }
     run('INSERT INTO settings (key, value_json, updated_at) VALUES (?,?,?) ' +
         'ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at',
       'hardened_at', JSON.stringify(nowIso()), nowIso());
@@ -194,6 +290,7 @@ export function harden(force: boolean): void {
 
   getDb().exec('VACUUM');
   console.log(`\nDeleted ${demoUsers.length} account(s) and ${demoFamilies.length} synthetic family record(s).`);
+  console.log(`Cleared ${orphans} task(s) and notification(s) that would have pointed at nothing.`);
   console.log('The event log is append-only and was NOT deleted; it still records that the demo data existed.');
   console.log('\nNow re-run:  npm run prod:check');
 }

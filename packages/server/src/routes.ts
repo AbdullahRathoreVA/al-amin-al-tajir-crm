@@ -2,13 +2,13 @@
  * API v1. Versioned in the path so the website is not broken by CRM changes.
  * (spec 118 / 197)
  */
-import { Router, badRequest, notFound, forbidden, verifySignature, HttpError, type Ctx } from './http.ts';
+import { Router, badRequest, notFound, gone, forbidden, verifySignature, HttpError, type Ctx } from './http.ts';
 import { checkLoginAllowed, recordLoginFailure, recordLoginSuccess } from './core/ratelimit.ts';
 import { one, many, run, tx } from './db/index.ts';
 import { config } from './core/config.ts';
 import { newId, nowIso, plain, plainAll, safeJson } from './core/util.ts';
 import { login, logout, capabilitiesFor, canSeeSensitive, can, sessionsFor, revokeSession } from './core/auth.ts';
-import { recordEvent, familyTimeline, timelineFor, changesSince, diff, logAccess, type Actor } from './core/events.ts';
+import { recordEvent, familyTimeline, timelineFor, changesSince, diff, logAccess, historyOf, type Actor } from './core/events.ts';
 import { search as fullTextSearch, indexEntity, type Indexable } from './core/search.ts';
 import { notify, unreadFor, setNotificationState, createTask, completeTask } from './core/notify.ts';
 import {
@@ -40,6 +40,24 @@ const intParam = (v: string | null, dflt: number, max = 200): number => {
   const n = Number(v);
   return Number.isFinite(n) && n > 0 ? Math.min(n, max) : dflt;
 };
+
+/**
+ * "Not found" and "deleted" are different answers, and only one of them sends
+ * someone looking for a typo in a link that was always correct.
+ *
+ * The append-only event log outlives the row, so it can tell them apart. When
+ * it has a history for this id, the record was real and is gone: say so, with
+ * the date, and let the caller stop hunting.
+ */
+function missing(entityType: string, id: string, message: string): HttpError {
+  const h = historyOf(entityType, id);
+  if (!h) return notFound(message);
+  return gone(
+    `This ${entityType} was deleted. It existed from ${h.created} until ${h.last}. ` +
+    `The event log still holds its history.`,
+    { deleted: true, entityType, id, created: h.created, deletedAfter: h.last, lastKnown: h.lastSummary },
+  );
+}
 
 // ------------------------------------------------------------------ auth
 
@@ -170,7 +188,7 @@ router.get('/api/v1/families/:id', (c) => {
   c.require('family:read');
   const id = c.params.id!;
   const family = plain(one('SELECT * FROM families WHERE id = ?', id));
-  if (!family) throw notFound('No such family');
+  if (!family) throw missing('family', id, 'No such family');
 
   const sensitive = canSeeSensitive(c.user);
   // A date of birth is not shown to roles that have no operational need for it.
@@ -207,7 +225,7 @@ router.patch('/api/v1/families/:id', (c) => {
   c.require('family:write');
   const id = c.params.id!;
   const before = plain(one<Record<string, unknown>>('SELECT * FROM families WHERE id = ?', id));
-  if (!before) throw notFound('No such family');
+  if (!before) throw missing('family', id, 'No such family');
   const b = requireBody<Record<string, unknown>>(c);
 
   const allowed = ['name', 'status', 'owner_id', 'local_only', 'no_ai', 'no_sync'] as const;
@@ -268,7 +286,7 @@ router.patch('/api/v1/leads/:id', (c) => {
   c.require('lead:write');
   const id = c.params.id!;
   const before = plain(one<Record<string, unknown>>('SELECT * FROM leads WHERE id = ?', id));
-  if (!before) throw notFound('No such lead');
+  if (!before) throw missing('lead', id, 'No such lead');
   const b = requireBody<Record<string, unknown>>(c);
 
   const allowed = ['stage_id', 'owner_id', 'program_interest', 'desired_start',
@@ -329,7 +347,7 @@ router.patch('/api/v1/tours/:id', (c) => {
   c.require('tour:write');
   const id = c.params.id!;
   const before = plain(one<Record<string, unknown>>('SELECT * FROM tours WHERE id = ?', id));
-  if (!before) throw notFound('No such tour');
+  if (!before) throw missing('tour', id, 'No such tour');
   const b = requireBody<Record<string, unknown>>(c);
 
   const allowed = ['status', 'scheduled_for', 'owner_id', 'notes', 'completed_at'] as const;
@@ -401,7 +419,7 @@ router.get('/api/v1/registrations/:id', (c) => {
   const id = c.params.id!;
   const reg = plain(one<Record<string, unknown>>(
     `SELECT r.*, f.name AS family_name FROM registrations r JOIN families f ON f.id = r.family_id WHERE r.id = ?`, id));
-  if (!reg) throw notFound('No such registration');
+  if (!reg) throw missing('registration', id, 'No such registration');
   logAccess(c.user!.id, 'view_registration', 'registration', id);
 
   const payload = safeJson<Record<string, unknown>>(reg.payload_json as string, {});
@@ -418,7 +436,7 @@ router.patch('/api/v1/registrations/:id', (c) => {
   c.require('registration:write');
   const id = c.params.id!;
   const before = plain(one<Record<string, unknown>>('SELECT * FROM registrations WHERE id = ?', id));
-  if (!before) throw notFound('No such registration');
+  if (!before) throw missing('registration', id, 'No such registration');
   const b = requireBody<{ status?: string; program_id?: string | null; desired_start?: string | null }>(c);
   const sets: string[] = [];
   const params: (string | null)[] = [];
@@ -579,7 +597,7 @@ router.get('/api/v1/meta', (c) => ({
 router.get('/api/v1/registrations/:id/completeness', (c) => {
   c.require('registration:read');
   const result = assessRegistration(c.params.id!);
-  if (!result) throw notFound('No such registration');
+  if (!result) throw missing('registration', c.params.id!, 'No such registration');
   return result;
 });
 
@@ -832,7 +850,7 @@ router.get('/api/v1/families/:id/summary', async (c) => {
   // Built from the CALLER's permissions, so an educator cannot obtain a date of
   // birth by asking the AI for it. (spec 27)
   const result = await summariseFamily(c.params.id!, c.user!);
-  if (!result) throw notFound('No such family');
+  if (!result) throw missing('family', c.params.id!, 'No such family');
   logAccess(c.user!.id, 'ai_summary', 'family', c.params.id!);
   return result;
 });
@@ -841,7 +859,7 @@ router.get('/api/v1/families/:id/summary', async (c) => {
 router.get('/api/v1/families/:id/ai-facts', (c) => {
   c.require('family:read');
   const facts = factsForFamily(c.params.id!, c.user!);
-  if (!facts) throw notFound('No such family');
+  if (!facts) throw missing('family', c.params.id!, 'No such family');
   return facts;
 });
 

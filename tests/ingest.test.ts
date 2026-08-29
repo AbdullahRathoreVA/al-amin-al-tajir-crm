@@ -1074,3 +1074,93 @@ describe('honest reporting', () => {
     for (const i of h.issues) assert.ok(i.count > 0);
   });
 });
+
+
+// ------------------------------------------------------- destructive tooling
+
+/**
+ * On 2026-08-28 a real registration arrived from the website at 23:10:26. At
+ * 23:11:21 `prod:harden --force` matched its guardian address against
+ * `%@example.invalid` and deleted the family, the child, the lead, both
+ * registrations and the guardian. Only the append-only event log survived to
+ * show they had ever been there, and the orphaned review task in the attention
+ * radar still pointed at a registration that returned "No such registration".
+ *
+ * Note the fixture at the top of this file already uses an @example.invalid
+ * address, because that is what a test address looks like. That is precisely
+ * the trap: the pattern says "synthetic" and the ingest ledger says "a parent
+ * pressed submit", and the ledger is the one telling the truth.
+ */
+describe('prod:harden cannot delete real family data', () => {
+  test('a website registration survives, whatever address the parent typed', async () => {
+    const { harden } = await import('../packages/server/src/seed/production.ts');
+
+    const eventId = randomUUID();
+    const env = validateEnvelope(envelope('registration.created', registration({
+      guardian: {
+        fullName: 'Marguerite Okonkwo-Bell',
+        email: 'marguerite@example.invalid',   // the exact pattern harden hunts for
+        phone: '780-555-0163',
+        relationship: 'Parent',
+      },
+      child: { firstName: 'Adaeze', ageBand: '3-5 years' },
+    }), eventId));
+    assert.ok(env.ok, 'the fixture must be a valid envelope');
+    const result = ingest(env.value) as { familyId: string };
+    const familyId = result.familyId;
+    assert.ok(familyId);
+
+    const regBefore = one<{ id: string }>('SELECT id FROM registrations WHERE family_id = ?', familyId);
+    assert.ok(regBefore, 'the registration should exist before harden runs');
+
+    harden(true);
+
+    const family = one<{ id: string }>('SELECT id FROM families WHERE id = ?', familyId);
+    assert.ok(family, 'harden deleted a family that a real parent submitted');
+
+    const regAfter = one<{ id: string }>('SELECT id FROM registrations WHERE id = ?', regBefore.id);
+    assert.ok(regAfter, 'harden deleted a registration that a real parent submitted');
+
+    const guardian = one<{ id: string }>(
+      `SELECT id FROM guardians WHERE family_id = ? AND email = 'marguerite@example.invalid'`, familyId);
+    assert.ok(guardian, 'the guardian went with it');
+  });
+
+  test('it still removes genuinely seeded data, and takes a backup before it does', async () => {
+    const { harden } = await import('../packages/server/src/seed/production.ts');
+    const { run: dbRun } = await import('../packages/server/src/db/index.ts');
+
+    // A seeded family looks exactly like a website one except for the detail
+    // that matters: no inbound event ever created it, so source_id is NULL.
+    const fakeId = randomUUID();
+    const now = new Date().toISOString();
+    dbRun(`INSERT INTO families (id, name, status, source, source_id, created_at, updated_at)
+           VALUES (?,?,'prospective','website',NULL,?,?)`, fakeId, 'Fabricated family', now, now);
+    dbRun(`INSERT INTO guardians (id, family_id, first_name, last_name, email, created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?)`,
+      randomUUID(), fakeId, 'Nobody', 'Real', 'nobody@example.invalid', now, now);
+
+    const backupsBefore = listBackups().length;
+    harden(true);
+
+    assert.equal(
+      one<{ id: string }>('SELECT id FROM families WHERE id = ?', fakeId), undefined,
+      'harden must still remove data that no inbound event ever created');
+    assert.ok(listBackups().length > backupsBefore,
+      'harden must take a backup before it deletes anything');
+  });
+
+  test('a deleted record reports that it was deleted, not that it never existed', async () => {
+    const { historyOf } = await import('../packages/server/src/core/events.ts');
+
+    // The registration deleted in the incident above.
+    assert.equal(historyOf('registration', randomUUID()), null,
+      'an id that was never real has no history');
+
+    const known = one<{ entity_id: string }>(
+      `SELECT entity_id FROM events WHERE entity_type = 'registration' LIMIT 1`);
+    assert.ok(known);
+    const h = historyOf('registration', known.entity_id);
+    assert.ok(h && h.created, 'the append-only log outlives the row and can say when it existed');
+  });
+});
