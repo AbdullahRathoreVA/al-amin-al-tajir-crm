@@ -45,6 +45,10 @@ const { factsForFamily, ruleSummary, summariseFamily, dailyBrief, aiStatus } =
 const { visibleClassroomIds, register, mark, checkOut, assignStaff, unassignStaff,
         roomStandings } = await import('../packages/server/src/core/attendance.ts');
 const { timelineFor } = await import('../packages/server/src/core/events.ts');
+const { registerTransport, upsertTarget, targetFor, queue, due, suppressed, runChannel,
+        recentRuns: syncRuns, channelStatus, backoffMs, MAX_ATTEMPTS, mappingFor, toRow,
+        pluck } = await import('../packages/server/src/core/sync.ts');
+const { sheetsTransport } = await import('../packages/server/src/core/transports/sheets.ts');
 
 before(async () => {
   await connect();
@@ -1315,5 +1319,136 @@ describe('attendance', () => {
     assert.equal(unassignStaff(room, teacher.id, actor(director)), true);
     assert.equal(register(teacher, DAY).length, 0,
       'access must end when the assignment does');
+  });
+});
+
+
+// ------------------------------------------------------------ outbound sync
+
+/**
+ * The interesting failures in a sync are all in the retry logic, so these run
+ * against a fake transport rather than Google. A test that needs a spreadsheet
+ * to be reachable is a test nobody runs, and the retry path is exactly the part
+ * that only gets exercised on a bad day.
+ */
+describe('outbound sync', () => {
+  const CHANNEL = 'test-channel';
+  let syncFamily: string, quietFamily: string;
+  let behaviour: 'ok' | 'throw' = 'ok';
+  let ready: string | null = null;
+  let lastBatch: unknown[] = [];
+
+  before(async () => {
+    const { run: dbRun } = await import('../packages/server/src/db/index.ts');
+    const now = new Date().toISOString();
+
+    syncFamily = randomUUID(); quietFamily = randomUUID();
+    dbRun('INSERT INTO families (id, name, status, source, no_sync, created_at, updated_at) VALUES (?,?,?,?,0,?,?)',
+      syncFamily, 'Okonjo-Ferrante family', 'enrolled', 'manual', now, now);
+    dbRun('INSERT INTO families (id, name, status, source, no_sync, created_at, updated_at) VALUES (?,?,?,?,1,?,?)',
+      quietFamily, 'Private family', 'enrolled', 'manual', now, now);
+
+    registerTransport({
+      channel: CHANNEL,
+      notReadyReason: () => ready,
+      async send(_target, rows) {
+        lastBatch = rows;
+        if (behaviour === 'throw') throw new Error('the far end said no');
+        return { sent: rows.length };
+      },
+    });
+    upsertTarget(CHANNEL, { label: 'Test target', externalId: 'sheet-1', enabled: true });
+  });
+
+  test('a family marked "never sync" is excluded by the query, not by a later check', () => {
+    queue(CHANNEL, { hello: 'world' }, syncFamily);
+    queue(CHANNEL, { secret: 'do not send' }, quietFamily);
+
+    const rows = due(CHANNEL, new Date().toISOString());
+    assert.equal(rows.length, 1, 'only the family that allows syncing is due');
+    assert.equal(rows[0]?.family_id, syncFamily);
+    assert.equal(suppressed(CHANNEL), 1, 'and the opted-out one is reported, not silently dropped');
+  });
+
+  test('a run that sends marks the rows sent and stamps the target', async () => {
+    behaviour = 'ok';
+    const result = await runChannel(CHANNEL);
+    assert.equal(result.outcome, 'sent');
+    assert.equal(result.sent, 1);
+    assert.equal(result.skipped, 1, 'the opted-out row is reported as skipped');
+    assert.equal(lastBatch.length, 1, 'the batch is one request, not one per row');
+
+    assert.equal(due(CHANNEL, new Date().toISOString()).length, 0, 'nothing left due');
+    assert.ok(targetFor(CHANNEL)?.last_sync_at, 'the target records when it last synced');
+  });
+
+  test('an empty queue is still recorded, because "why didn\'t it sync?" is the question asked', async () => {
+    const before = syncRuns(CHANNEL, 50).length;
+    const result = await runChannel(CHANNEL);
+    assert.equal(result.outcome, 'nothing_queued');
+    assert.equal(syncRuns(CHANNEL, 50).length, before + 1,
+      'a log that records only successes cannot explain a silence');
+  });
+
+  test('not connected is its own outcome, never a failure', async () => {
+    ready = 'Nobody has connected this yet.';
+    queue(CHANNEL, { hello: 'again' }, syncFamily);
+
+    const result = await runChannel(CHANNEL);
+    assert.equal(result.outcome, 'not_connected');
+    assert.equal(result.failed, 0, 'a setup step must not light up as an incident');
+
+    const status = channelStatus(CHANNEL);
+    assert.equal(status.connected, false);
+    assert.equal(status.notConnectedReason, 'Nobody has connected this yet.');
+    assert.ok(Number(status.pending) > 0, 'the row is still queued, waiting');
+    ready = null;
+  });
+
+  test('a failing send backs off, then gives up rather than retrying forever', async () => {
+    behaviour = 'throw';
+    const { one: dbOne } = await import('../packages/server/src/db/index.ts');
+
+    let last: Awaited<ReturnType<typeof runChannel>> | null = null;
+    for (let i = 0; i < MAX_ATTEMPTS; i++) {
+      // now far in the future so the backoff never holds the row back here;
+      // the point under test is the attempt count, not the clock.
+      last = await runChannel(CHANNEL, { now: '2099-01-01T00:00:00.000Z' });
+    }
+    assert.equal(last?.outcome, 'failed');
+
+    const row = dbOne<{ status: string; attempts: number; last_error: string }>(
+      `SELECT status, attempts, last_error FROM outbox
+        WHERE channel = ? AND family_id = ? ORDER BY created_at DESC LIMIT 1`, CHANNEL, syncFamily);
+    assert.equal(row?.status, 'dead', 'a bounded retry, then a person looks at it');
+    assert.equal(row?.attempts, MAX_ATTEMPTS);
+    assert.match(row?.last_error ?? '', /the far end said no/);
+    behaviour = 'ok';
+  });
+
+  test('backoff grows, is jittered, and is capped', () => {
+    // Same attempt count, different randomness, must not collide: without the
+    // jitter every row from one burst retries in the same instant.
+    assert.notEqual(backoffMs(3, () => 0), backoffMs(3, () => 1));
+    assert.ok(backoffMs(1, () => 0.5) < backoffMs(5, () => 0.5), 'it grows');
+    assert.ok(backoffMs(99, () => 1) <= 3_600_000, 'capped so a recovery is picked up');
+    assert.ok(backoffMs(3, () => 0) >= 2 ** 3 * 1000 * 0.5, 'never collapses to zero');
+  });
+
+  test('mapping renders a missing field as blank, not the string "undefined"', () => {
+    const mapping = mappingFor(null);
+    const row = toRow({ guardian: { fullName: 'Ines Vukovic' }, programInterest: 'Nova Stars' }, mapping);
+    assert.ok(row.includes('Ines Vukovic'));
+    assert.ok(row.includes('Nova Stars'));
+    assert.equal(row.some((cell) => cell === 'undefined' || cell === 'null'), false,
+      'a gap in a parent record must not read as the word undefined');
+    assert.equal(pluck({ a: { b: null } }, 'a.b.c'), '', 'walking off the end is blank');
+  });
+
+  test('the Sheets transport refuses to pretend it is connected', () => {
+    // No Google credentials exist in the test environment, which is the point.
+    const reason = sheetsTransport.notReadyReason(null);
+    assert.ok(reason, 'it must report why, not silently do nothing');
+    assert.match(reason, /GOOGLE_CLIENT_ID|not connected/i);
   });
 });

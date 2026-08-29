@@ -11,6 +11,8 @@ import { migrateUp, applied, loadMigrations } from './db/migrate.ts';
 import { seedTemplates } from './core/drafts.ts';
 import { startBackupSchedule, newestBackup } from './core/backup.ts';
 import { seedAutomations, startAutomationSchedule } from './core/automations.ts';
+import { registerTransport, startSyncSchedule } from './core/sync.ts';
+import { sheetsTransport } from './core/transports/sheets.ts';
 import { seedReference, referenceIsPresent } from './core/reference.ts';
 import { handle, securityHeaders } from './http.ts';
 import { router } from './routes.ts';
@@ -141,6 +143,13 @@ startBackupSchedule(24, 14);
 
 // Hourly sweep for the time-based rules. Event-driven ones fire inline.
 startAutomationSchedule(60);
+
+// Registered unconditionally; it reports itself as not connected until the
+// Google credentials exist. Registering only when configured would make an
+// unconfigured channel indistinguishable from an unknown one, and /system
+// needs to tell a setup step apart from a broken integration.
+registerTransport(sheetsTransport);
+startSyncSchedule(15);
 
 server.listen(config.port, config.host, () => {
   console.log(`[crm] Tiny Stars Command Center  ->  http://${config.host}:${config.port}`);

@@ -25,6 +25,8 @@ import { createBackup, listBackups, testRestore, pruneBackups } from './core/bac
 import { listAutomations, runAutomation, runScheduled, recentRuns, runsFor, disableAll,
   TRIGGERS, type Automation } from './core/automations.ts';
 import { aiStatus, summariseFamily, dailyBrief, factsForFamily } from './core/ai.ts';
+import { listTargets, upsertTarget, runChannel, recentRuns as syncRuns, channelStatus,
+         DEFAULT_MAPPING, mappingFor, targetFor, SYNC_CHANNELS } from './core/sync.ts';
 import {
   listClassrooms, assignStaff, unassignStaff, staffFor, register, mark, checkOut,
   roomStandings, daySummary, logRegisterRead, today, isDay, AttendanceError,
@@ -1066,4 +1068,65 @@ router.post('/api/v1/attendance/checkout', (c) => {
   if (!isDay(day)) throw badRequest('day must be a date in YYYY-MM-DD form');
 
   return attendance(() => checkOut(user, actorOf(c), b.childId!, day, b.releasedTo ?? ''));
+});
+
+// -------------------------------------------------------------- outbound sync
+
+
+
+router.get('/api/v1/sync', (c) => {
+  c.require('audit:read');
+  return {
+    targets: listTargets(),
+    channels: SYNC_CHANNELS.map(channelStatus),
+    defaultMapping: DEFAULT_MAPPING,
+    runs: syncRuns(undefined, 20),
+  };
+});
+
+router.patch('/api/v1/sync/:channel', (c) => {
+  c.require('settings:write');
+  const channel = c.params.channel!;
+  if (!(SYNC_CHANNELS as readonly string[]).includes(channel)) throw notFound('No such sync channel');
+
+  const b = requireBody<{
+    label?: string; externalId?: string | null; tabName?: string | null;
+    mapping?: Record<string, string>; enabled?: boolean;
+  }>(c);
+
+  if (b.mapping !== undefined) {
+    if (typeof b.mapping !== 'object' || b.mapping === null || Array.isArray(b.mapping)) {
+      throw badRequest('mapping must be an object of column heading to field path');
+    }
+    for (const [heading, path] of Object.entries(b.mapping)) {
+      if (typeof path !== 'string' || !path.trim()) {
+        throw badRequest(`mapping["${heading}"] must be a non-empty field path`);
+      }
+    }
+  }
+
+  const before = targetFor(channel);
+  const after = upsertTarget(channel, b);
+
+  // Turning a sync on starts sending family details somewhere else. That is
+  // worth a line in the log that cannot be rewritten.
+  if (before?.enabled !== after.enabled) {
+    recordEvent({
+      entityType: 'system', entityId: `sync:${channel}`, type: 'updated', actor: actorOf(c),
+      summary: after.enabled
+        ? `Outbound sync to ${after.label} switched ON`
+        : `Outbound sync to ${after.label} switched OFF`,
+      before: before ? { enabled: !!before.enabled } : null, after: { enabled: !!after.enabled },
+    });
+  }
+  return { target: after, mapping: mappingFor(after), status: channelStatus(channel) };
+});
+
+/** Run now, rather than waiting for the sweep. */
+router.post('/api/v1/sync/:channel/run', async (c) => {
+  c.require('settings:write');
+  const channel = c.params.channel!;
+  if (!(SYNC_CHANNELS as readonly string[]).includes(channel)) throw notFound('No such sync channel');
+  const result = await runChannel(channel);
+  return { result, status: channelStatus(channel) };
 });

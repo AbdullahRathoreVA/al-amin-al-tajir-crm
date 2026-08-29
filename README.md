@@ -94,6 +94,12 @@ has tests behind it.
   2D fallback that is not a downgrade in capability.
 - **Roles and permissions** — capability-based. An educator cannot see a date of
   birth or export the family list.
+- **Outbound sync** — a queue with real retry behaviour: batched sends,
+  exponential backoff with jitter, a bounded retry ending in a dead-letter, and
+  `never sync` honoured by the query that selects rows rather than by anyone
+  remembering. A channel nobody has connected reports itself as not connected,
+  with the reason, instead of warning about a backlog with nowhere to go.
+  Google Sheets is wired to it and waiting only on credentials.
 - **Attendance and classrooms** — the daily register, check-in and check-out.
   An educator sees the rooms they are assigned to in `classroom_staff` and no
   others; assigned to nothing, they see nobody. Checking a child out will not
@@ -119,7 +125,7 @@ honest gap. The `/system` page lists this in the app too.
 
 | Area | Phase |
 |---|---|
-| Google Sheets two-way sync, Excel import/export | 3 |
+| Google Sheets **outbound is built but needs credentials**; inbound sync | 3 |
 | Local AI assistant, natural-language search, AI briefings | 4 |
 | Documents, incidents, staff module | 6 |
 | Email, calendar, billing | 7 |

@@ -3,6 +3,7 @@ import { api } from '../lib/api.ts';
 import { useApi } from '../lib/hooks.ts';
 import { useRouter } from '../lib/router.tsx';
 import { Panel, Badge, Button, Empty, Spinner, ErrorNote, When, type Tone } from '../ui/kit.tsx';
+import { SyncPanel } from './SyncPanel.tsx';
 
 interface Check { id: string; label: string; state: 'good' | 'warning' | 'critical' | 'unknown'; detail: string }
 
@@ -22,6 +23,7 @@ export function System() {
   const { query } = useRouter();
   const tab = query.get('tab') ?? 'health';
   const res = useApi<SystemData>('/system/health');
+  const me = useApi<{ capabilities: string[] }>('/auth/me');
 
   if (res.loading && !res.data) return <Spinner label="Checking the system" />;
   if (res.error) return <ErrorNote error={res.error} retry={res.reload} />;
@@ -49,6 +51,8 @@ export function System() {
           ))}
         </ul>
       </Panel>
+
+      <SyncPanel canEdit={me.data?.capabilities.includes('settings:write') ?? false} />
 
       <Panel
         title="Inbound events from the website"

@@ -12,6 +12,7 @@
 import { one, run, tx } from '../db/index.ts';
 import { newId, nowIso, sha256, normEmail, normPhone, splitName, familyNameFrom } from '../core/util.ts';
 import { recordEvent, type Actor } from '../core/events.ts';
+import { queue as queueForSync } from '../core/sync.ts';
 import { findFamilyMatches, findChildInFamily, type FamilyMatch } from '../core/match.ts';
 import { indexEntity } from '../core/search.ts';
 import { notify, createTask } from '../core/notify.ts';
@@ -187,13 +188,14 @@ function reindexFamily(familyId: string): void {
 
 /** Queue an outbound sync. Never called inside the CRM write transaction's
  *  success path in a way that could fail it. */
-function queueOutbox(channel: string, payload: unknown): void {
-  const now = nowIso();
-  run(
-    `INSERT INTO outbox (id, channel, payload_json, status, next_retry_at, created_at, updated_at)
-     VALUES (?,?,?,'pending',?,?,?)`,
-    newId(), channel, JSON.stringify(payload), now, now, now,
-  );
+/**
+ * Queues outbound work. Delegates to core/sync so there is one definition of
+ * what a queued row looks like - in particular `family_id`, which is what lets
+ * the sender honour a family's "never sync" setting in the query that selects
+ * rows, rather than in a check somebody has to remember.
+ */
+function queueOutbox(channel: string, payload: { familyId?: string } & Record<string, unknown>): void {
+  queueForSync(channel, payload, payload.familyId ?? null);
 }
 
 // ------------------------------------------------------------- family resolve

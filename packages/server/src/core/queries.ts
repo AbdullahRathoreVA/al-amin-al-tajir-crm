@@ -6,6 +6,7 @@
  * never 0, which reads as "measured, and the answer is none". (spec 14 / 150)
  */
 import { one, many } from '../db/index.ts';
+import { channelStatus, SYNC_CHANNELS } from './sync.ts';
 import { dayBounds, nowIso, plainAll } from './util.ts';
 import { newestBackup } from './backup.ts';
 
@@ -119,6 +120,8 @@ export function attention(): AttentionItem[] {
   push({
     id: 'sync-errors', severity: 'critical',
     label: 'integration events failed',
+    // Only genuine failures. Rows queued for a channel nobody has connected
+    // are not an incident and must not appear on the attention radar.
     count: count(`SELECT COUNT(*) n FROM outbox WHERE status IN ('failed','dead')`),
     link: '/system?tab=outbox',
     detail: 'Outbound syncs that could not be delivered',
@@ -270,10 +273,19 @@ export function systemHealth(): SystemCheck[] {
 
   const failedOut = count(`SELECT COUNT(*) n FROM outbox WHERE status IN ('failed','dead')`);
   const pendingOut = count(`SELECT COUNT(*) n FROM outbox WHERE status = 'pending'`);
+  // A queue with nowhere to go is a setup step, not a fault. Reporting it as a
+  // warning for months - which is what happened, because nothing drained the
+  // outbox - teaches people that this panel's warnings can be ignored.
+  const unconnected = SYNC_CHANNELS
+    .map(channelStatus)
+    .filter((s) => !s.connected)
+    .map((s) => String(s.channel));
+  const parked = unconnected.length > 0 && failedOut === 0;
   checks.push({
     id: 'outbox', label: 'Outbound sync',
-    state: failedOut > 0 ? 'critical' : pendingOut > 0 ? 'warning' : 'good',
+    state: failedOut > 0 ? 'critical' : parked ? 'unknown' : pendingOut > 0 ? 'warning' : 'good',
     detail: failedOut > 0 ? `${failedOut} failed, ${pendingOut} pending`
+      : parked ? `${pendingOut} queued, waiting for ${unconnected.join(', ')} to be connected`
       : pendingOut > 0 ? `${pendingOut} queued, none failed`
       : 'Nothing queued or failed',
   });
@@ -290,7 +302,18 @@ export function systemHealth(): SystemCheck[] {
 
   // Deliberately 'unknown', not 'good'. Nothing has connected these yet, and a
   // green light for a thing that does not exist is a lie. (spec 137 / 218)
-  checks.push({ id: 'google-sheets', label: 'Google Sheets', state: 'unknown', detail: 'Not connected (Phase 3)' });
+  //
+  // The sync itself is built now, so the reason is no longer 'unimplemented'.
+  // Ask the channel what is actually missing rather than restating a phase
+  // number that stopped being true.
+  const sheets = channelStatus('google-sheets');
+  checks.push({
+    id: 'google-sheets', label: 'Google Sheets',
+    state: sheets.connected ? (Number(sheets.dead) > 0 ? 'critical' : 'good') : 'unknown',
+    detail: sheets.connected
+      ? `Connected. ${sheets.sent} row(s) sent, ${sheets.pending} queued`
+      : String(sheets.notConnectedReason ?? 'Not connected'),
+  });
   checks.push({ id: 'ai', label: 'AI assistant', state: 'unknown', detail: 'Not configured (Phase 4)' });
   const backup = newestBackup();
   checks.push({

@@ -1,10 +1,29 @@
 # Google Sheets
 
-## Status: not built. Phase 3.
+## Status: built, not connected.
 
-The CRM already queues every ingested event to `outbox` with
-`channel: 'google-sheets'`, so the data needed to sync is being captured now.
-There is no Google code in the repository yet, and no Google credentials.
+The sending machinery is done and tested: batching, exponential backoff with
+jitter, a bounded retry that ends in a dead-letter, `families.no_sync` enforced
+in the selecting query, an editable column mapping, and a run log that records
+the attempts that did nothing as well as the ones that sent.
+
+What is missing is a Google account to send to. Three secrets are required:
+
+```
+GOOGLE_CLIENT_ID
+GOOGLE_CLIENT_SECRET
+GOOGLE_REFRESH_TOKEN
+```
+
+Until all three are set, `/system` reports the channel as **not connected**
+with that exact reason, queued rows wait rather than failing, and the health
+check reads `unknown` rather than warning about a backlog nobody can clear.
+
+**One caveat, stated plainly.** `core/transports/sheets.ts` is the only file in
+this repository that has never been run against the real thing, because that
+needs a Google Cloud project that cannot be created from the build. Its two
+HTTP calls and its reading of Google's replies are unverified. Watch the first
+real run rather than trusting it; everything it depends on is tested.
 
 ## The rule that decides the design
 
