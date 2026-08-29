@@ -10,9 +10,16 @@ import { System } from './routes/System.tsx';
 import { Analytics } from './routes/Analytics.tsx';
 import { Import } from './routes/Import.tsx';
 import { Automations } from './routes/Automations.tsx';
+import { Attendance } from './routes/Attendance.tsx';
 
-const NAV = [
+/**
+ * `cap` hides an entry from roles that cannot use it. Only the register is
+ * gated so far: an educator has no reason to see a link that will refuse them,
+ * and a link that refuses is worse than no link.
+ */
+const NAV: { to: string; label: string; glyph: string; cap?: string }[] = [
   { to: '/', label: 'Dashboard', glyph: '◇' },
+  { to: '/attendance', label: 'Register', glyph: '☑', cap: 'attendance:read' },
   { to: '/families', label: 'Families', glyph: '⌂' },
   { to: '/leads', label: 'Leads', glyph: '↗' },
   { to: '/tours', label: 'Tours', glyph: '◷' },
@@ -24,8 +31,9 @@ const NAV = [
   { to: '/system', label: 'System', glyph: '⚙' },
 ];
 
-// The five a phone actually needs. (spec 239)
-const MOBILE_NAV = ['/', '/tasks', '/tours', '/families', '/system'];
+// What a phone actually needs. The register is on it because marking children
+// in is done standing in a doorway, not at a desk. (spec 239)
+const MOBILE_NAV = ['/', '/attendance', '/tasks', '/tours', '/families', '/system'];
 
 export function App() {
   return <RouterProvider><Root /></RouterProvider>;
@@ -151,7 +159,7 @@ function Shell({ me, onSignedOut }: { me: Me; onSignedOut: () => void }) {
         </Link>
 
         <nav className="flex flex-1 flex-col gap-0.5">
-          {NAV.map((n) => {
+          {NAV.filter((n) => !n.cap || me.capabilities.includes(n.cap)).map((n) => {
             const on = n.to === '/' ? path === '/' : path.startsWith(n.to);
             return (
               <Link key={n.to} to={n.to}
@@ -217,7 +225,8 @@ function Shell({ me, onSignedOut }: { me: Me; onSignedOut: () => void }) {
         <nav className="fixed inset-x-0 bottom-0 z-20 flex border-t lg:hidden"
              style={{ borderColor: 'var(--line)', background: 'var(--surface-raised)',
                       paddingBottom: 'env(safe-area-inset-bottom)' }}>
-          {NAV.filter((n) => MOBILE_NAV.includes(n.to)).map((n) => {
+          {NAV.filter((n) => MOBILE_NAV.includes(n.to)
+                          && (!n.cap || me.capabilities.includes(n.cap))).map((n) => {
             const on = n.to === '/' ? path === '/' : path.startsWith(n.to);
             return (
               <Link key={n.to} to={n.to}
@@ -246,6 +255,7 @@ function Routes({ userName }: { userName: string }) {
   if (path === '/registrations') return <Registrations />;
   if (path.startsWith('/registrations/')) return <RegistrationDetail />;
   if (path === '/tasks') return <Tasks />;
+  if (path === '/attendance') return <Attendance />;
   if (path === '/analytics') return <Analytics />;
   if (path === '/import') return <Import />;
   if (path === '/automations') return <Automations />;

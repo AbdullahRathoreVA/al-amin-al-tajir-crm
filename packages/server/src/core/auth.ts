@@ -126,6 +126,8 @@ export type Capability =
   | 'tour:read' | 'tour:write'
   | 'registration:read' | 'registration:write'
   | 'task:read' | 'task:write'
+  | 'classroom:read' | 'classroom:write'
+  | 'attendance:read' | 'attendance:write'
   | 'note:write'
   | 'data:export'
   | 'audit:read'
@@ -136,8 +138,9 @@ export type Capability =
 const ALL: Capability[] = [
   'family:read', 'family:write', 'child:read', 'child:read_sensitive', 'child:write',
   'lead:read', 'lead:write', 'tour:read', 'tour:write', 'registration:read', 'registration:write',
-  'task:read', 'task:write', 'note:write', 'data:export', 'audit:read', 'user:manage',
-  'settings:write', 'demo:reset',
+  'task:read', 'task:write', 'classroom:read', 'classroom:write',
+  'attendance:read', 'attendance:write', 'note:write', 'data:export', 'audit:read',
+  'user:manage', 'settings:write', 'demo:reset',
 ];
 
 const ROLES: Record<Role, Capability[]> = {
@@ -147,12 +150,29 @@ const ROLES: Record<Role, Capability[]> = {
     'family:read', 'family:write', 'child:read', 'child:write',
     'lead:read', 'lead:write', 'tour:read', 'tour:write',
     'registration:read', 'registration:write', 'task:read', 'task:write', 'note:write',
+    // Placement is an admissions question: which room has space, and when.
+    // Not attendance, which is about children already in the building.
+    'classroom:read',
   ],
   // An educator sees the children in their care, not the sales pipeline and not
   // dates of birth by default.
-  educator: ['family:read', 'child:read', 'task:read', 'task:write', 'note:write', 'tour:read'],
-  accounting: ['family:read', 'child:read', 'registration:read', 'task:read', 'data:export'],
-  readonly: ['family:read', 'child:read', 'lead:read', 'tour:read', 'registration:read', 'task:read'],
+  // Marking the register is the educator's core job, so they get attendance
+  // write. The capability says "may mark attendance"; it does not say whose.
+  // classroom_staff decides that, and an educator with no room sees nobody.
+  educator: [
+    'family:read', 'child:read', 'task:read', 'task:write', 'note:write', 'tour:read',
+    'classroom:read', 'attendance:read', 'attendance:write',
+  ],
+  // Billing follows the register, so accounting reads attendance and never
+  // writes it. An invoice must not be able to edit the day it bills for.
+  accounting: [
+    'family:read', 'child:read', 'registration:read', 'task:read', 'data:export',
+    'classroom:read', 'attendance:read',
+  ],
+  readonly: [
+    'family:read', 'child:read', 'lead:read', 'tour:read', 'registration:read', 'task:read',
+    'classroom:read', 'attendance:read',
+  ],
 };
 
 export function can(user: Pick<User, 'role'> | null, cap: Capability): boolean {

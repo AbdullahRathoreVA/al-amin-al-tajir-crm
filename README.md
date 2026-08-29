@@ -94,6 +94,12 @@ has tests behind it.
   2D fallback that is not a downgrade in capability.
 - **Roles and permissions** — capability-based. An educator cannot see a date of
   birth or export the family list.
+- **Attendance and classrooms** — the daily register, check-in and check-out.
+  An educator sees the rooms they are assigned to in `classroom_staff` and no
+  others; assigned to nothing, they see nobody. Checking a child out will not
+  proceed without recording who collected them. Room ratios are read from a
+  configured rule and report "not measured" when there is no rule or no staff
+  assigned, rather than showing a reassuring number nobody entered.
 - **Website analytics** — visits, page views, real time-on-page, a
   visit-to-enquiry funnel that names the step people drop at, traffic sources,
   most-viewed pages, clicks by name and devices. No cookies, no persistent
@@ -115,7 +121,7 @@ honest gap. The `/system` page lists this in the app too.
 |---|---|
 | Google Sheets two-way sync, Excel import/export | 3 |
 | Local AI assistant, natural-language search, AI briefings | 4 |
-| Attendance, classrooms, documents, incidents, staff module | 6 |
+| Documents, incidents, staff module | 6 |
 | Email, calendar, billing | 7 |
 | Team sync between devices | 9 |
 | Voice agents | 10 |

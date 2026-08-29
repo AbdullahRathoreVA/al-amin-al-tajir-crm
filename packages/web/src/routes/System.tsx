@@ -138,7 +138,7 @@ export function System() {
         <ul className="flex flex-col gap-1.5 text-[13px]" style={{ color: 'var(--text-muted)' }}>
           <li>Google Sheets two-way sync. The outbound queue above already records what would be sent.</li>
           <li>Sending email or SMS to a parent. The CRM drafts; a person sends.</li>
-          <li>Attendance, classrooms, documents, incidents, staff.</li>
+          <li>Documents, incidents, staff records.</li>
           <li>Billing and payments.</li>
           <li>
             Posting to Facebook or Instagram. This is not a code gap: it needs Meta Business

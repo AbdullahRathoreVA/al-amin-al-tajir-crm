@@ -42,6 +42,9 @@ const { seedAutomations, listAutomations, runAutomation, runsFor, disableAll } =
   await import('../packages/server/src/core/automations.ts');
 const { factsForFamily, ruleSummary, summariseFamily, dailyBrief, aiStatus } =
   await import('../packages/server/src/core/ai.ts');
+const { visibleClassroomIds, register, mark, checkOut, assignStaff, unassignStaff,
+        roomStandings } = await import('../packages/server/src/core/attendance.ts');
+const { timelineFor } = await import('../packages/server/src/core/events.ts');
 
 before(async () => {
   await connect();
@@ -1162,5 +1165,155 @@ describe('prod:harden cannot delete real family data', () => {
     assert.ok(known);
     const h = historyOf('registration', known.entity_id);
     assert.ok(h && h.created, 'the append-only log outlives the row and can say when it existed');
+  });
+});
+
+
+// ------------------------------------------------------- attendance & rooms
+
+/**
+ * The register is the first module that records what happens to a child during
+ * the day, so the tests that matter most are the ones about who can see it.
+ *
+ * The boundary is `classroom_staff`, not a WHERE clause someone remembered to
+ * write, and these assert it from the outside: an educator with no room sees
+ * nobody, an educator with one room sees exactly that room, and neither can be
+ * talked into seeing a date of birth.
+ */
+describe('attendance', () => {
+  let room: string, otherRoom: string;
+  let teacher: Awaited<ReturnType<typeof createUser>>;
+  let director: Awaited<ReturnType<typeof createUser>>;
+  let mine: string, theirs: string;
+  const DAY = '2026-08-29';
+
+  before(async () => {
+    const { run: dbRun } = await import('../packages/server/src/db/index.ts');
+    const now = new Date().toISOString();
+
+    room = randomUUID(); otherRoom = randomUUID();
+    dbRun('INSERT INTO classrooms (id, name, program_id, capacity, active, created_at) VALUES (?,?,NULL,12,1,?)',
+      room, 'Sunflower Room', now);
+    dbRun('INSERT INTO classrooms (id, name, program_id, capacity, active, created_at) VALUES (?,?,NULL,12,1,?)',
+      otherRoom, 'Bluebell Room', now);
+
+    const fam = randomUUID();
+    dbRun('INSERT INTO families (id, name, status, source, created_at, updated_at) VALUES (?,?,?,?,?,?)',
+      fam, 'Adeyemi-Cardoso family', 'enrolled', 'manual', now, now);
+
+    mine = randomUUID(); theirs = randomUUID();
+    const child = 'INSERT INTO children (id, family_id, first_name, date_of_birth, age_band, classroom_id, status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)';
+    dbRun(child, mine, fam, 'Folasade', '2022-04-11', '3-5 years', room, 'enrolled', now, now);
+    dbRun(child, theirs, fam, 'Oluwaseun', '2021-09-02', '3-5 years', otherRoom, 'enrolled', now, now);
+
+    teacher = createUser('teacher-att@test.local', 'Ngozi Abiodun', 'educator', 'test-pw-1234');
+    director = createUser('director-att@test.local', 'Halvard Nyqvist', 'director', 'test-pw-1234');
+  });
+
+  const actor = (u: { id: string }) => ({ type: 'user' as const, id: u.id, source: 'manual' });
+
+  test('an educator assigned to no room sees nobody', () => {
+    assert.deepEqual(visibleClassroomIds(teacher), []);
+    assert.equal(register(teacher, DAY).length, 0,
+      'an unassigned educator must not fall through to seeing every child');
+  });
+
+  test('a director is not scoped, and sees both rooms', () => {
+    assert.equal(visibleClassroomIds(director), null,
+      'null means unscoped and must not be confused with an empty list');
+    const ids = register(director, DAY).map((r) => r.child_id);
+    assert.ok(ids.includes(mine) && ids.includes(theirs));
+  });
+
+  test('assigning a room widens the educator to exactly that room', () => {
+    assignStaff(room, teacher.id, 'lead', actor(director));
+    const rows = register(teacher, DAY);
+    assert.deepEqual(rows.map((r) => r.child_id), [mine],
+      'the educator should see their room and only their room');
+  });
+
+  test('an educator still cannot see a date of birth', () => {
+    const [row] = register(teacher, DAY);
+    assert.ok(row, 'the educator can see the child');
+    assert.equal('date_of_birth' in row, false,
+      'the column must be absent, not blanked (spec 27)');
+    const [seen] = register(director, DAY, room);
+    assert.ok(seen);
+    assert.equal(seen.date_of_birth, '2022-04-11', 'a director still gets it');
+  });
+
+  test('an educator cannot mark a child in a room they are not assigned to', () => {
+    assert.throws(
+      () => mark(teacher, actor(teacher), { childId: theirs, day: DAY, status: 'present' }),
+      /not in a room you are assigned to/);
+  });
+
+  test('a child not yet marked shows as expected, not missing', () => {
+    const [row] = register(teacher, DAY);
+    assert.ok(row);
+    assert.equal(row.status, 'expected',
+      'a register that only lists children someone already ticked is not a register');
+  });
+
+  test('checking in records who did it, and lands in the append-only log', () => {
+    mark(teacher, actor(teacher), { childId: mine, day: DAY, status: 'present' });
+    const [row] = register(teacher, DAY);
+    assert.ok(row);
+    assert.equal(row.status, 'present');
+    assert.ok(row.checked_in_at, 'the time is recorded');
+
+    const events = timelineFor('child', mine, 20);
+    assert.ok(events.some((e) => e.type === 'attendance_marked'),
+      'the change is in the event log, which cannot be rewritten');
+  });
+
+  test('a child cannot be checked out without naming who collected them', () => {
+    assert.throws(
+      () => checkOut(teacher, actor(teacher), mine, DAY, '   '),
+      /who collected the child/);
+  });
+
+  test('checking out records the name, and refuses to happen twice', () => {
+    const row = checkOut(teacher, actor(teacher), mine, DAY, 'Grandmother, arranged by phone');
+    assert.equal(row.released_to, 'Grandmother, arranged by phone');
+    assert.ok(row.checked_out_at);
+
+    assert.throws(
+      () => checkOut(teacher, actor(teacher), mine, DAY, 'Someone else'),
+      /already collected/,
+      'a second check-out would overwrite the record of who actually took the child');
+  });
+
+  test('a room with no configured ratio says so rather than showing a number', () => {
+    const [standing] = roomStandings(teacher, DAY);
+    assert.ok(standing);
+    assert.equal(standing.measured, false);
+    assert.equal(standing.withinRatio, null, 'no invented verdict');
+    assert.match(standing.note ?? '', /not measured/);
+  });
+
+  test('a configured ratio with nobody assigned is still not measurable', async () => {
+    const { run: dbRun } = await import('../packages/server/src/db/index.ts');
+    const now = new Date().toISOString();
+    const prog = randomUUID();
+    const empty = randomUUID();
+    dbRun('INSERT INTO programs (id, slug, name, active, sort_order, created_at) VALUES (?,?,?,1,99,?)',
+      prog, 'ratio-' + prog.slice(0, 8), 'Ratio Test Program', now);
+    dbRun('INSERT INTO ratio_rules (program_id, children_per_staff, source, updated_at) VALUES (?,?,?,?)',
+      prog, 8, 'test', now);
+    dbRun('INSERT INTO classrooms (id, name, program_id, capacity, active, created_at) VALUES (?,?,?,10,1,?)',
+      empty, 'Unstaffed Room', prog, now);
+
+    const standing = roomStandings(director, DAY).find((r) => r.classroomId === empty);
+    assert.ok(standing);
+    assert.equal(standing.measured, false, 'dividing by zero staff is not a ratio');
+    assert.equal(standing.requiredPerStaff, 8, 'the rule is still reported');
+    assert.match(standing.note ?? '', /Nobody is assigned/);
+  });
+
+  test('removing the assignment closes the educator back down to nobody', () => {
+    assert.equal(unassignStaff(room, teacher.id, actor(director)), true);
+    assert.equal(register(teacher, DAY).length, 0,
+      'access must end when the assignment does');
   });
 });

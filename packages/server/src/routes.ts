@@ -25,6 +25,11 @@ import { createBackup, listBackups, testRestore, pruneBackups } from './core/bac
 import { listAutomations, runAutomation, runScheduled, recentRuns, runsFor, disableAll,
   TRIGGERS, type Automation } from './core/automations.ts';
 import { aiStatus, summariseFamily, dailyBrief, factsForFamily } from './core/ai.ts';
+import {
+  listClassrooms, assignStaff, unassignStaff, staffFor, register, mark, checkOut,
+  roomStandings, daySummary, logRegisterRead, today, isDay, AttendanceError,
+  type AttendanceStatus,
+} from './core/attendance.ts';
 import { ingest } from './ingest/pipeline.ts';
 
 export const router = new Router();
@@ -959,3 +964,106 @@ router.get('/api/v1/ingest/ping', () => ({
   configured: Boolean(config.ingestSecret),
   mode: config.mode,
 }), { anonymous: true });
+
+// ------------------------------------------------------ classrooms & register
+
+/**
+ * An AttendanceError is a refusal a person should read — "that child is not in
+ * a room you are assigned to" — not a crash. Anything else keeps falling
+ * through to the generic 500, with the detail staying on stderr.
+ */
+function attendance<T>(work: () => T): T {
+  try {
+    return work();
+  } catch (err) {
+    if (err instanceof AttendanceError) throw badRequest(err.message);
+    throw err;
+  }
+}
+
+/** The day being asked about. Rejects junk rather than silently using today. */
+function dayParam(c: Ctx): string {
+  const raw = c.query.get('day');
+  if (raw === null) return today();
+  if (!isDay(raw)) throw badRequest('day must be a date in YYYY-MM-DD form');
+  return raw;
+}
+
+router.get('/api/v1/classrooms', (c) => {
+  const user = c.require('classroom:read');
+  return { classrooms: listClassrooms(user) };
+});
+
+router.get('/api/v1/classrooms/:id/staff', (c) => {
+  c.require('classroom:read');
+  return { staff: staffFor(c.params.id!) };
+});
+
+router.post('/api/v1/classrooms/:id/staff', (c) => {
+  c.require('classroom:write');
+  const b = requireBody<{ userId?: string; role?: string; remove?: boolean }>(c);
+  if (!b.userId) throw badRequest('userId is required');
+  const room = c.params.id!;
+
+  // Removal is a POST because the router speaks GET, POST and PATCH. Naming it
+  // in the body beats inventing a second path that means "the opposite".
+  if (b.remove) {
+    if (!unassignStaff(room, b.userId, actorOf(c))) throw notFound('That person is not in this room');
+    return { removed: true };
+  }
+
+  const role = b.role ?? 'support';
+  if (!['lead', 'support', 'relief'].includes(role)) {
+    throw badRequest('role must be lead, support or relief');
+  }
+  assignStaff(room, b.userId, role, actorOf(c));
+  return { staff: staffFor(room) };
+});
+
+router.get('/api/v1/attendance', (c) => {
+  const user = c.require('attendance:read');
+  const day = dayParam(c);
+  const classroom = c.query.get('classroom') ?? undefined;
+  logRegisterRead(user, day, classroom);
+  return {
+    day,
+    register: register(user, day, classroom),
+    summary: daySummary(user, day),
+  };
+});
+
+router.get('/api/v1/attendance/standings', (c) => {
+  const user = c.require('attendance:read');
+  const day = dayParam(c);
+  return { day, rooms: roomStandings(user, day) };
+});
+
+const STATUSES = ['expected', 'present', 'absent', 'late', 'excused', 'left_early'];
+
+router.post('/api/v1/attendance/mark', (c) => {
+  const user = c.require('attendance:write');
+  const b = requireBody<{
+    childId?: string; day?: string; status?: string; releasedTo?: string; note?: string;
+  }>(c);
+  if (!b.childId) throw badRequest('childId is required');
+  if (!b.status || !STATUSES.includes(b.status)) {
+    throw badRequest(`status must be one of ${STATUSES.join(', ')}`);
+  }
+  const day = b.day ?? today();
+  if (!isDay(day)) throw badRequest('day must be a date in YYYY-MM-DD form');
+
+  return attendance(() => mark(user, actorOf(c), {
+    childId: b.childId!, day, status: b.status as AttendanceStatus,
+    releasedTo: b.releasedTo, note: b.note,
+  }));
+});
+
+router.post('/api/v1/attendance/checkout', (c) => {
+  const user = c.require('attendance:write');
+  const b = requireBody<{ childId?: string; day?: string; releasedTo?: string }>(c);
+  if (!b.childId) throw badRequest('childId is required');
+  const day = b.day ?? today();
+  if (!isDay(day)) throw badRequest('day must be a date in YYYY-MM-DD form');
+
+  return attendance(() => checkOut(user, actorOf(c), b.childId!, day, b.releasedTo ?? ''));
+});
