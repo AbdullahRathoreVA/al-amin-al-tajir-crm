@@ -10,9 +10,11 @@
  * which is deliberate — a wrong message to a parent about their child cannot be
  * unsent. (spec 297 / 300 / 301 / 313)
  */
-import { one, many, run } from '../db/index.ts';
-import { newId, nowIso, plainAll } from './util.ts';
+import { one, many, run, tx } from '../db/index.ts';
+import { newId, nowIso, plain, plainAll } from './util.ts';
 import { recordEvent, type Actor } from './events.ts';
+import { queue } from './sync.ts';
+import type { User } from './auth.ts';
 
 export type Trigger =
   | 'tour_followup' | 'registration_incomplete' | 'registration_received'
@@ -303,4 +305,128 @@ export function draftsFor(familyId: string) {
     `SELECT d.*, u.name AS created_by_name FROM message_drafts d
        LEFT JOIN users u ON u.id = d.created_by
       WHERE d.family_id = ? ORDER BY d.created_at DESC LIMIT 25`, familyId));
+}
+
+
+// ------------------------------------------------------------------ sending
+
+/**
+ * Refusals a person should read. Every one of these is a reason a message is
+ * not going out, and the person who pressed send needs to know which.
+ */
+export class SendRefused extends Error {}
+
+/**
+ * Queue a draft for delivery.
+ *
+ * This is the only path to sending anything to a parent, and it exists to be
+ * narrow. The rule is that the CRM drafts and a person sends, so:
+ *
+ *   - the actor must be a real signed-in user. An automation, a scheduled
+ *     rule or the AI layer runs as 'system' or 'ai' and is refused here, not
+ *     merely discouraged by convention;
+ *   - the person's name is recorded on the draft, and a database trigger
+ *     rejects any delivery row that cannot name one;
+ *   - a guardian who opted out is refused, because an opt-out that only the
+ *     UI honours is not an opt-out.
+ *
+ * Queuing is all this does. Actual delivery is the outbox worker's job, so a
+ * mail provider being down cannot fail the click or lose the record.
+ */
+export function requestSend(draftId: string, user: User, actor: Actor): Record<string, unknown> {
+  if (actor.type !== 'user' || !actor.id) {
+    // The load-bearing line in this file.
+    throw new SendRefused('Only a signed-in person can send a message to a family');
+  }
+
+  const draft = plain(one<Record<string, unknown>>(
+    'SELECT * FROM message_drafts WHERE id = ?', draftId));
+  if (!draft) throw new SendRefused('No such draft');
+
+  if (draft.delivery_state === 'queued') throw new SendRefused('That message is already queued to send');
+  if (draft.delivery_state === 'sent') {
+    throw new SendRefused(`That message was already sent at ${String(draft.delivered_at).slice(11, 16)}`);
+  }
+  if (draft.status === 'discarded') throw new SendRefused('That draft was discarded');
+
+  const to = typeof draft.to_address === 'string' ? draft.to_address.trim() : '';
+  if (!to) throw new SendRefused('That draft has no email address to send to');
+
+  // An opt-out recorded against the guardian must hold whatever the UI offers.
+  if (draft.guardian_id) {
+    const g = one<{ opted_out: number; email: string | null }>(
+      'SELECT opted_out, email FROM guardians WHERE id = ?', String(draft.guardian_id));
+    if (g?.opted_out) throw new SendRefused('That guardian has opted out of messages');
+  }
+
+  const now = nowIso();
+  let result!: Record<string, unknown>;
+  tx(() => {
+    const outboxId = queue('email', {
+      draftId,
+      to,
+      subject: draft.subject ?? '',
+      body: draft.body,
+      requestedBy: user.id,
+    }, String(draft.family_id));
+
+    run(`UPDATE message_drafts
+            SET delivery_state = 'queued', requested_by = ?, requested_at = ?,
+                outbox_id = ?, delivery_error = NULL,
+                status = CASE WHEN status = 'composed' THEN 'edited' ELSE status END
+          WHERE id = ?`, user.id, now, outboxId, draftId);
+
+    recordEvent({
+      entityType: 'family', entityId: String(draft.family_id), type: 'message_queued', actor,
+      // Names the person, because "the system emailed a parent" is never the
+      // true description of what happened here.
+      summary: `${user.name} sent a message to ${to}: ${String(draft.subject ?? 'no subject')}`,
+      before: { delivery_state: draft.delivery_state ?? 'none' },
+      after: { delivery_state: 'queued', to, requestedBy: user.id },
+    });
+
+    result = plain(one<Record<string, unknown>>(
+      'SELECT * FROM message_drafts WHERE id = ?', draftId))!;
+  });
+  return result;
+}
+
+/**
+ * Brings each queued draft into line with what the outbox actually did.
+ *
+ * Called after every email sweep. Reads the outbox rather than being told, so
+ * a draft cannot end up claiming a delivery the queue never made.
+ */
+export function reconcileDeliveries(): number {
+  const rows = many<{ id: string; status: string; last_error: string | null; updated_at: string }>(
+    `SELECT d.id, o.status, o.last_error, o.updated_at
+       FROM message_drafts d JOIN outbox o ON o.id = d.outbox_id
+      WHERE d.delivery_state = 'queued' AND o.status IN ('sent','dead')`);
+
+  let changed = 0;
+  for (const r of rows) {
+    const delivered = r.status === 'sent';
+    run(`UPDATE message_drafts
+            SET delivery_state = ?, delivered_at = ?, delivery_error = ?,
+                status = CASE WHEN ? THEN 'sent' ELSE status END,
+                resolved_at = COALESCE(resolved_at, ?)
+          WHERE id = ?`,
+      delivered ? 'sent' : 'failed',
+      delivered ? r.updated_at : null,
+      delivered ? null : (r.last_error ?? 'Delivery gave up after repeated failures'),
+      delivered ? 1 : 0,
+      r.updated_at, r.id);
+    changed++;
+  }
+  return changed;
+}
+
+/** Drafts waiting on the queue, for /system and the family timeline. */
+export function pendingDeliveries(): Record<string, unknown>[] {
+  return plainAll(many<Record<string, unknown>>(
+    `SELECT d.id, d.family_id, d.to_address, d.subject, d.delivery_state, d.requested_at,
+            d.delivery_error, u.name AS requested_by_name
+       FROM message_drafts d LEFT JOIN users u ON u.id = d.requested_by
+      WHERE d.delivery_state IN ('queued','failed')
+      ORDER BY d.requested_at DESC LIMIT 50`));
 }

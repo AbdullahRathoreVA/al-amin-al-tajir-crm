@@ -18,7 +18,8 @@ import {
 import { validateEnvelope } from '../../shared/src/contract.ts';
 import { analyticsBundle, isWindow, type Window } from './core/analytics.ts';
 import { assessRegistration, assessFamilyRegistration, incompleteRegistrations } from './core/completeness.ts';
-import { templates, composeDraft, suggestTemplate, saveDraft, draftsFor } from './core/drafts.ts';
+import { templates, composeDraft, suggestTemplate, saveDraft, draftsFor,
+         requestSend, pendingDeliveries, SendRefused } from './core/drafts.ts';
 import { parseCsv, guessMapping, preview as previewImport, commitImport, IMPORT_FIELDS, FIELD_LABELS,
   type ImportField } from './core/csv.ts';
 import { createBackup, listBackups, testRestore, pruneBackups } from './core/backup.ts';
@@ -1129,4 +1130,30 @@ router.post('/api/v1/sync/:channel/run', async (c) => {
   if (!(SYNC_CHANNELS as readonly string[]).includes(channel)) throw notFound('No such sync channel');
   const result = await runChannel(channel);
   return { result, status: channelStatus(channel) };
+});
+
+/**
+ * Send a drafted message.
+ *
+ * The only route in the system that can put words in front of a parent, and it
+ * is a POST from a signed-in person with `message:send`. There is deliberately
+ * no scheduled, automated or AI-triggered path to it: `requestSend` refuses any
+ * actor that is not a user, and a database trigger refuses any delivery row
+ * that cannot name one. Three layers, because this is the rule that makes the
+ * rest of the system trustworthy.
+ */
+router.post('/api/v1/drafts/:id/send', (c) => {
+  const user = c.require('message:send');
+  try {
+    const draft = requestSend(c.params.id!, user, actorOf(c));
+    return { draft, queued: true };
+  } catch (err) {
+    if (err instanceof SendRefused) throw badRequest(err.message);
+    throw err;
+  }
+});
+
+router.get('/api/v1/drafts/pending', (c) => {
+  c.require('family:read');
+  return { pending: pendingDeliveries() };
 });

@@ -51,13 +51,19 @@ export interface Transport {
   /** Why it is not ready, or null when it is. */
   notReadyReason(target: SyncTarget | null): string | null;
   /** Sends a batch. Throws to mark the whole batch failed and retryable. */
-  send(target: SyncTarget, rows: OutboxRow[]): Promise<{ sent: number; detail?: string }>;
+  /** `target` is null for channels that need no configured destination — email
+   *  sends to whatever the queued row names. A transport that does need one
+   *  says so in notReadyReason and will not be called without it. */
+  send(target: SyncTarget | null, rows: OutboxRow[]): Promise<{ sent: number; detail?: string }>;
+  /** Optional. Runs after every attempt, including the ones that did nothing,
+   *  so a channel can reconcile its own records with what the queue did. */
+  afterRun?(result: RunResult): void;
 }
 
 /** Channels the system knows about, whether or not they are connected yet.
  *  Lives here rather than in routes so the health check can read it without
  *  importing the router and creating a cycle. */
-export const SYNC_CHANNELS = ['google-sheets'] as const;
+export const SYNC_CHANNELS = ['google-sheets', 'email'] as const;
 
 const transports = new Map<string, Transport>();
 export function registerTransport(t: Transport): void { transports.set(t.channel, t); }
@@ -189,7 +195,11 @@ export async function runChannel(
            considered, sent, skipped, failed, detail) VALUES (?,?,?,?,?,?,?,?,?,?)`,
       runId, channel, now, nowIso(), r.outcome, r.considered, r.sent, r.skipped, r.failed,
       r.detail);
-    return { channel, ...r };
+    const result = { channel, ...r };
+    // Never let a channel's own bookkeeping turn a completed run into a crash.
+    try { transport?.afterRun?.(result); }
+    catch (err) { console.error('[crm] afterRun failed:', err instanceof Error ? err.message : err); }
+    return result;
   };
 
   if (!transport) {
@@ -211,7 +221,7 @@ export async function runChannel(
   }
 
   try {
-    const { sent, detail } = await transport.send(target!, rows);
+    const { sent, detail } = await transport.send(target, rows);
     const stamped = nowIso();
     tx(() => {
       for (const r of rows) {

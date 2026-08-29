@@ -90,7 +90,10 @@ export const sheetsTransport: Transport = {
     return null;
   },
 
-  async send(target: SyncTarget, rows: OutboxRow[]): Promise<{ sent: number; detail?: string }> {
+  async send(target: SyncTarget | null, rows: OutboxRow[]): Promise<{ sent: number; detail?: string }> {
+    // notReadyReason above refuses a missing target, so reaching here without
+    // one means the contract was broken rather than the sheet being unset.
+    if (!target?.external_id) throw new Error('No spreadsheet is configured for this target');
     const mapping = mappingFor(target);
     // One request for the whole batch. The API's per-minute write quota is
     // spent per request, not per row, so a request per row is how a normal
@@ -99,7 +102,7 @@ export const sheetsTransport: Transport = {
 
     const tab = target.tab_name?.trim() || 'Sheet1';
     const range = `${encodeURIComponent(tab)}!A1`;
-    const url = `${SHEETS_API}/${encodeURIComponent(target.external_id!)}/values/${range}`
+    const url = `${SHEETS_API}/${encodeURIComponent(target.external_id)}/values/${range}`
               + ':append?valueInputOption=RAW&insertDataOption=INSERT_ROWS';
 
     const res = await fetch(url, {

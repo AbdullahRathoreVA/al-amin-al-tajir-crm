@@ -94,6 +94,13 @@ has tests behind it.
   2D fallback that is not a downgrade in capability.
 - **Roles and permissions** — capability-based. An educator cannot see a date of
   birth or export the family list.
+- **Sending a drafted message** — the CRM writes it; a signed-in person sends
+  it. That is enforced in three places, not one: `requestSend` refuses any
+  actor that is not a user, so no automation or AI path can reach it; a
+  database trigger rejects any delivery row that cannot name the person who
+  asked; and a guardian's opt-out is checked before anything is queued. Nothing
+  is sent inline — it goes on the same queue as everything else, so a mail
+  provider being down cannot fail the click or lose the record.
 - **Outbound sync** — a queue with real retry behaviour: batched sends,
   exponential backoff with jitter, a bounded retry ending in a dead-letter, and
   `never sync` honoured by the query that selects rows rather than by anyone
@@ -128,7 +135,7 @@ honest gap. The `/system` page lists this in the app too.
 | Google Sheets **outbound is built but needs credentials**; inbound sync | 3 |
 | Local AI assistant, natural-language search, AI briefings | 4 |
 | Documents, incidents, staff module | 6 |
-| Email, calendar, billing | 7 |
+| Email **sending is built but needs credentials**; calendar, billing | 7 |
 | Team sync between devices | 9 |
 | Voice agents | 10 |
 

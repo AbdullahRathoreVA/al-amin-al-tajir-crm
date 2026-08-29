@@ -13,6 +13,7 @@ import { startBackupSchedule, newestBackup } from './core/backup.ts';
 import { seedAutomations, startAutomationSchedule } from './core/automations.ts';
 import { registerTransport, startSyncSchedule } from './core/sync.ts';
 import { sheetsTransport } from './core/transports/sheets.ts';
+import { emailTransport } from './core/transports/email.ts';
 import { seedReference, referenceIsPresent } from './core/reference.ts';
 import { handle, securityHeaders } from './http.ts';
 import { router } from './routes.ts';
@@ -149,6 +150,7 @@ startAutomationSchedule(60);
 // unconfigured channel indistinguishable from an unknown one, and /system
 // needs to tell a setup step apart from a broken integration.
 registerTransport(sheetsTransport);
+registerTransport(emailTransport);
 startSyncSchedule(15);
 
 server.listen(config.port, config.host, () => {

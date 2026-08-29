@@ -49,6 +49,10 @@ const { registerTransport, upsertTarget, targetFor, queue, due, suppressed, runC
         recentRuns: syncRuns, channelStatus, backoffMs, MAX_ATTEMPTS, mappingFor, toRow,
         pluck } = await import('../packages/server/src/core/sync.ts');
 const { sheetsTransport } = await import('../packages/server/src/core/transports/sheets.ts');
+const { emailTransport } = await import('../packages/server/src/core/transports/email.ts');
+const { requestSend, reconcileDeliveries } = await import('../packages/server/src/core/drafts.ts');
+const { familyTimeline } = await import('../packages/server/src/core/events.ts');
+const actorFor = (u: { id: string }) => ({ type: 'user' as const, id: u.id, source: 'manual' });
 
 before(async () => {
   await connect();
@@ -1450,5 +1454,163 @@ describe('outbound sync', () => {
     const reason = sheetsTransport.notReadyReason(null);
     assert.ok(reason, 'it must report why, not silently do nothing');
     assert.match(reason, /GOOGLE_CLIENT_ID|not connected/i);
+  });
+});
+
+
+// --------------------------------------------------------------- sending mail
+
+/**
+ * The rule the whole system is built to keep is that the CRM drafts and a
+ * person sends. These are the tests that would catch it being broken — not the
+ * happy path, which is easy, but every route by which something might send on
+ * its own.
+ */
+describe('sending a message needs a person', () => {
+  let family: string, guardian: string, optedOutGuardian: string;
+  let sender: Awaited<ReturnType<typeof createUser>>;
+
+  before(async () => {
+    const { run: dbRun } = await import('../packages/server/src/db/index.ts');
+    const now = new Date().toISOString();
+
+    family = randomUUID();
+    dbRun('INSERT INTO families (id, name, status, source, created_at, updated_at) VALUES (?,?,?,?,?,?)',
+      family, 'Bergqvist-Oyelaran family', 'enrolled', 'manual', now, now);
+
+    guardian = randomUUID(); optedOutGuardian = randomUUID();
+    const g = 'INSERT INTO guardians (id, family_id, first_name, email, opted_out, is_primary, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)';
+    dbRun(g, guardian, family, 'Annika', 'annika@example.invalid', 0, 1, now, now);
+    dbRun(g, optedOutGuardian, family, 'Tunde', 'tunde@example.invalid', 1, 0, now, now);
+
+    sender = createUser('sender@test.local', 'Priyanka Deshmukh', 'director', 'test-pw-1234');
+  });
+
+  const draftRow = (over: Record<string, unknown> = {}) => {
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    return { id, now, over };
+  };
+
+  async function makeDraft(guardianId: string | null, to: string | null) {
+    const { run: dbRun } = await import('../packages/server/src/db/index.ts');
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    dbRun(`INSERT INTO message_drafts (id, family_id, guardian_id, channel, to_address, subject,
+             body, status, author, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)`,
+      id, family, guardianId, 'email', to, 'About your visit',
+      'We are looking forward to meeting you.', 'composed', 'template', now);
+    return id;
+  }
+
+  test('an automation cannot send, however it is called', async () => {
+    const id = await makeDraft(guardian, 'annika@example.invalid');
+    // This is the actor an automation or a scheduled rule runs as.
+    assert.throws(
+      () => requestSend(id, sender, { type: 'system', id: null, source: 'automation' }),
+      /Only a signed-in person/);
+  });
+
+  test('the AI layer cannot send either', async () => {
+    const id = await makeDraft(guardian, 'annika@example.invalid');
+    assert.throws(
+      () => requestSend(id, sender, { type: 'ai', id: null, source: 'ai' }),
+      /Only a signed-in person/);
+  });
+
+  test('the database refuses a delivery that cannot name a person', async () => {
+    const { run: dbRun } = await import('../packages/server/src/db/index.ts');
+    const id = await makeDraft(guardian, 'annika@example.invalid');
+    // Straight past the application, the way a future bug would.
+    assert.throws(
+      () => dbRun(`UPDATE message_drafts SET delivery_state = 'queued' WHERE id = ?`, id),
+      /without recording who sent it/,
+      'the rule must survive somebody bypassing core/drafts.ts');
+  });
+
+  test('a guardian who opted out is refused', async () => {
+    const id = await makeDraft(optedOutGuardian, 'tunde@example.invalid');
+    assert.throws(() => requestSend(id, sender, actorFor(sender)), /opted out/);
+  });
+
+  test('a draft with no address is refused rather than queued to nowhere', async () => {
+    const id = await makeDraft(guardian, null);
+    assert.throws(() => requestSend(id, sender, actorFor(sender)), /no email address/);
+  });
+
+  test('a person sending queues it, names them, and records it in the event log', async () => {
+    const { one: dbOne } = await import('../packages/server/src/db/index.ts');
+    const id = await makeDraft(guardian, 'annika@example.invalid');
+
+    const result = requestSend(id, sender, actorFor(sender));
+    assert.equal(result.delivery_state, 'queued');
+    assert.equal(result.requested_by, sender.id);
+    assert.ok(result.outbox_id, 'it is queued, not sent inline: a slow provider must not fail the click');
+
+    const queued = dbOne<{ channel: string; family_id: string }>(
+      'SELECT channel, family_id FROM outbox WHERE id = ?', String(result.outbox_id));
+    assert.equal(queued?.channel, 'email');
+    assert.equal(queued?.family_id, family, 'so "never sync" can be honoured by the query');
+
+    const events = familyTimeline(family, 20);
+    const sent = events.find((e) => e.type === 'message_queued');
+    assert.ok(sent, 'the send is in the append-only log');
+    assert.match(sent.summary ?? '', /Priyanka Deshmukh/,
+      'the log names the person, not "the system"');
+  });
+
+  test('the same draft cannot be sent twice', async () => {
+    const id = await makeDraft(guardian, 'annika@example.invalid');
+    requestSend(id, sender, actorFor(sender));
+    assert.throws(() => requestSend(id, sender, actorFor(sender)), /already queued/);
+  });
+
+  test('email reports itself as not connected rather than quietly dropping messages', () => {
+    const reason = emailTransport.notReadyReason(null);
+    assert.ok(reason, 'no credentials exist in the test environment, and it must say so');
+    assert.match(reason, /EMAIL_API_URL|not connected/i);
+
+    // The queued drafts above are still queued, waiting — not lost, not failed.
+    const status = channelStatus('email');
+    assert.equal(status.connected, false);
+    assert.ok(Number(status.pending) > 0, 'the messages wait for a provider rather than vanishing');
+  });
+
+  test('reconciliation marks a draft sent only when the queue actually sent it', async () => {
+    const { run: dbRun, one: dbOne } = await import('../packages/server/src/db/index.ts');
+    const id = await makeDraft(guardian, 'annika@example.invalid');
+    const draft = requestSend(id, sender, actorFor(sender));
+
+    // Nothing has sent it yet, so nothing should claim it did.
+    reconcileDeliveries();
+    assert.equal(
+      dbOne<{ delivery_state: string }>('SELECT delivery_state FROM message_drafts WHERE id = ?', id)
+        ?.delivery_state, 'queued');
+
+    dbRun(`UPDATE outbox SET status = 'sent', updated_at = ? WHERE id = ?`,
+      new Date().toISOString(), String(draft.outbox_id));
+    reconcileDeliveries();
+
+    const after = dbOne<{ delivery_state: string; status: string; delivered_at: string }>(
+      'SELECT delivery_state, status, delivered_at FROM message_drafts WHERE id = ?', id);
+    assert.equal(after?.delivery_state, 'sent');
+    assert.equal(after?.status, 'sent');
+    assert.ok(after?.delivered_at);
+  });
+
+  test('a draft the queue gave up on is marked failed, with the reason', async () => {
+    const { run: dbRun, one: dbOne } = await import('../packages/server/src/db/index.ts');
+    const id = await makeDraft(guardian, 'annika@example.invalid');
+    const draft = requestSend(id, sender, actorFor(sender));
+
+    dbRun(`UPDATE outbox SET status = 'dead', last_error = ?, updated_at = ? WHERE id = ?`,
+      'mailbox does not exist', new Date().toISOString(), String(draft.outbox_id));
+    reconcileDeliveries();
+
+    const after = dbOne<{ delivery_state: string; delivery_error: string; status: string }>(
+      'SELECT delivery_state, delivery_error, status FROM message_drafts WHERE id = ?', id);
+    assert.equal(after?.delivery_state, 'failed');
+    assert.match(after?.delivery_error ?? '', /mailbox does not exist/);
+    assert.notEqual(after?.status, 'sent', 'a failed delivery must never read as sent');
   });
 });
