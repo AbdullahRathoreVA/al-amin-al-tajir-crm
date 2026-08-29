@@ -34,7 +34,7 @@ primary_region = "yyz"
   #
   # min = 1 costs a little more than letting it sleep, and it is worth it. A
   # suspended machine has to cold start, and the website gives up forwarding a
-  # registration after 6 seconds. The parent would still see "received" — the
+  # registration after 8 seconds. The parent would still see "received" — the
   # confirmation is deliberately not blocked on delivery — while the CRM never
   # got it. A dropped registration is the one failure this system exists to
   # prevent.
