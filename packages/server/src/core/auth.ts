@@ -130,6 +130,7 @@ export type Capability =
   | 'attendance:read' | 'attendance:write'
   | 'note:write'
   | 'message:send'
+  | 'logbook:read' | 'logbook:write'
   | 'data:export'
   | 'audit:read'
   | 'user:manage'
@@ -140,7 +141,8 @@ const ALL: Capability[] = [
   'family:read', 'family:write', 'child:read', 'child:read_sensitive', 'child:write',
   'lead:read', 'lead:write', 'tour:read', 'tour:write', 'registration:read', 'registration:write',
   'task:read', 'task:write', 'classroom:read', 'classroom:write',
-  'attendance:read', 'attendance:write', 'note:write', 'message:send', 'data:export', 'audit:read',
+  'attendance:read', 'attendance:write', 'note:write', 'message:send',
+  'logbook:read', 'logbook:write', 'data:export', 'audit:read',
   'user:manage', 'settings:write', 'demo:reset',
 ];
 

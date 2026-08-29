@@ -101,6 +101,16 @@ has tests behind it.
   asked; and a guardian's opt-out is checked before anything is queued. Nothing
   is sent inline — it goes on the same queue as everything else, so a mail
   provider being down cannot fail the click or lose the record.
+- **Logbook** — say what you bought or did, in one ordinary sentence, and it is
+  written down. The amount, the date, the supplier and the category are read out
+  by rule rather than by a model, because those are exactly specified and a
+  regex is right every time; anything the sentence did not say is asked about,
+  once, as a question. What you actually said is kept verbatim next to what was
+  parsed from it, so a bad parse can be corrected from the original. It exports
+  a real .xlsx — four coloured sheets, frozen headers, currency formatting —
+  written by hand from `node:zlib`, because a spreadsheet is not worth a
+  dependency tree. Speech in and out uses the browser's own Web Speech API: no
+  key, no per-minute charge, and the microphone is only shown where it works.
 - **Outbound sync** — a queue with real retry behaviour: batched sends,
   exponential backoff with jitter, a bounded retry ending in a dead-letter, and
   `never sync` honoured by the query that selects rows rather than by anyone

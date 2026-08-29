@@ -11,6 +11,7 @@ import { Analytics } from './routes/Analytics.tsx';
 import { Import } from './routes/Import.tsx';
 import { Automations } from './routes/Automations.tsx';
 import { Attendance } from './routes/Attendance.tsx';
+import { Logbook } from './routes/Logbook.tsx';
 
 /**
  * `cap` hides an entry from roles that cannot use it. Only the register is
@@ -25,6 +26,7 @@ const NAV: { to: string; label: string; glyph: string; cap?: string }[] = [
   { to: '/tours', label: 'Tours', glyph: '◷' },
   { to: '/registrations', label: 'Registrations', glyph: '≡' },
   { to: '/tasks', label: 'Tasks', glyph: '✓' },
+  { to: '/logbook', label: 'Logbook', glyph: '✎', cap: 'logbook:read' },
   { to: '/analytics', label: 'Analytics', glyph: '◔' },
   { to: '/automations', label: 'Automations', glyph: '↻' },
   { to: '/import', label: 'Import', glyph: '⤓' },
@@ -256,6 +258,7 @@ function Routes({ userName }: { userName: string }) {
   if (path.startsWith('/registrations/')) return <RegistrationDetail />;
   if (path === '/tasks') return <Tasks />;
   if (path === '/attendance') return <Attendance />;
+  if (path === '/logbook') return <Logbook />;
   if (path === '/analytics') return <Analytics />;
   if (path === '/import') return <Import />;
   if (path === '/automations') return <Automations />;

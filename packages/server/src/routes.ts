@@ -34,6 +34,9 @@ import {
   type AttendanceStatus,
 } from './core/attendance.ts';
 import { ingest } from './ingest/pipeline.ts';
+import { parseUtterance, gapsIn, record as logRecord, update as logUpdate, list as logList,
+         totals as logTotals, recall as logRecall, workbook as logWorkbook,
+         LogbookError, type LogKind, type LogDraft } from './core/logbook.ts';
 
 export const router = new Router();
 
@@ -1156,4 +1159,105 @@ router.post('/api/v1/drafts/:id/send', (c) => {
 router.get('/api/v1/drafts/pending', (c) => {
   c.require('family:read');
   return { pending: pendingDeliveries() };
+});
+
+// -------------------------------------------------------------------- logbook
+
+const LOG_KINDS = ['purchase', 'supply', 'task', 'note'];
+
+function logbook<T>(work: () => T): T {
+  try { return work(); }
+  catch (err) {
+    if (err instanceof LogbookError) throw badRequest(err.message);
+    throw err;
+  }
+}
+
+/** Reads a sentence and says what it understood, plus what it still needs. */
+router.post('/api/v1/logbook/parse', (c) => {
+  c.require('logbook:write');
+  const b = requireBody<{ text?: string; today?: string }>(c);
+  const text = (b.text ?? '').trim();
+  if (!text) throw badRequest('Say what happened and I will write it down');
+  if (text.length > 2000) throw badRequest('That is longer than this is meant for');
+
+  // The caller supplies its own idea of today, because the browser knows the
+  // local date and the server only knows UTC — "yesterday" at 6pm in Alberta is
+  // a different day from "yesterday" in UTC, and this is a ledger.
+  const today = b.today && /^\d{4}-\d{2}-\d{2}$/.test(b.today) ? b.today : nowIso().slice(0, 10);
+
+  const draft = parseUtterance(text, today);
+  return { draft, gaps: gapsIn(draft), today };
+});
+
+router.post('/api/v1/logbook', (c) => {
+  c.require('logbook:write');
+  const b = requireBody<Partial<LogDraft> & { text?: string }>(c);
+  const rawText = (b.rawText ?? b.text ?? '').trim();
+  if (!rawText) throw badRequest('rawText is required — keep what was actually said');
+  if (b.kind && !LOG_KINDS.includes(b.kind)) {
+    throw badRequest(`kind must be one of ${LOG_KINDS.join(', ')}`);
+  }
+  if (b.amountCents !== undefined && b.amountCents !== null) {
+    if (!Number.isInteger(b.amountCents) || b.amountCents < 0) {
+      throw badRequest('amountCents must be a whole number of cents, not a decimal');
+    }
+  }
+
+  return logbook(() => logRecord({
+    kind: (b.kind as LogKind) ?? 'note',
+    happenedOn: b.happenedOn,
+    summary: b.summary,
+    vendor: b.vendor,
+    amountCents: b.amountCents ?? null,
+    category: b.category,
+    classroomId: b.classroomId ?? null,
+    rawText,
+    source: b.source === 'voice' ? 'voice' : 'typed',
+  }, actorOf(c)));
+});
+
+router.patch('/api/v1/logbook/:id', (c) => {
+  c.require('logbook:write');
+  const b = requireBody<Partial<LogDraft>>(c);
+  return logbook(() => logUpdate(c.params.id!, b, actorOf(c)));
+});
+
+router.get('/api/v1/logbook', (c) => {
+  c.require('logbook:read');
+  const filter = {
+    from: c.query.get('from') ?? undefined,
+    to: c.query.get('to') ?? undefined,
+    kind: (c.query.get('kind') as LogKind) ?? undefined,
+    category: c.query.get('category') ?? undefined,
+  };
+  const q = c.query.get('q')?.trim();
+  return {
+    entries: q ? logRecall(q, 50) : logList(filter),
+    totals: logTotals(filter),
+    query: q ?? null,
+  };
+});
+
+/**
+ * The workbook, base64 in JSON.
+ *
+ * Same shape as the CSV export: the router speaks JSON, and a spreadsheet is
+ * not worth teaching it binary for. The client turns it back into a file.
+ */
+router.get('/api/v1/logbook/workbook', (c) => {
+  c.require('logbook:read');
+  const filter = {
+    from: c.query.get('from') ?? undefined,
+    to: c.query.get('to') ?? undefined,
+    kind: (c.query.get('kind') as LogKind) ?? undefined,
+  };
+  const buf = logWorkbook(filter);
+  logAccess(c.user!.id, 'export_logbook', 'logbook', filter.from ?? 'all');
+  return {
+    filename: `tiny-stars-logbook-${nowIso().slice(0, 10)}.xlsx`,
+    contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    base64: buf.toString('base64'),
+    bytes: buf.length,
+  };
 });

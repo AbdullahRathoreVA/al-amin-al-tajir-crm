@@ -53,6 +53,9 @@ const { emailTransport } = await import('../packages/server/src/core/transports/
 const { requestSend, reconcileDeliveries } = await import('../packages/server/src/core/drafts.ts');
 const { familyTimeline } = await import('../packages/server/src/core/events.ts');
 const actorFor = (u: { id: string }) => ({ type: 'user' as const, id: u.id, source: 'manual' });
+const { parseMoney, parseDay, parseVendor, parseCategory, parseUtterance, gapsIn,
+        record: logRecord, update: logUpdate, recall: logRecall, totals: logTotals,
+        workbook: logWorkbook } = await import('../packages/server/src/core/logbook.ts');
 
 before(async () => {
   await connect();
@@ -1612,5 +1615,184 @@ describe('sending a message needs a person', () => {
     assert.equal(after?.delivery_state, 'failed');
     assert.match(after?.delivery_error ?? '', /mailbox does not exist/);
     assert.notEqual(after?.status, 'sent', 'a failed delivery must never read as sent');
+  });
+});
+
+
+// -------------------------------------------------------------------- logbook
+
+/**
+ * The parsing is done by rule rather than by a model, so it can be pinned down
+ * exactly — which is the whole reason it is done by rule. These are the cases
+ * that decide whether a ledger is right or quietly wrong.
+ */
+describe('logbook parsing', () => {
+  const TODAY = '2026-08-29'; // a Saturday
+
+  test('money is read as integer cents, never a float', () => {
+    assert.equal(parseMoney('I spent $84.32 at Costco'), 8432);
+    assert.equal(parseMoney('paid 84.32 dollars'), 8432);
+    assert.equal(parseMoney('$1,284.50 of furniture'), 128450);
+    assert.equal(parseMoney('it was $40'), 4000);
+    assert.equal(parseMoney('84.32'), 8432);
+    // 0.1 + 0.2 problems do not get to touch a year of spending.
+    assert.equal(Number.isInteger(parseMoney('$0.10')!), true);
+    assert.equal(parseMoney('$0.10')! + parseMoney('$0.20')!, 30);
+  });
+
+  test('a bare count is not money', () => {
+    assert.equal(parseMoney('picked up 2 boxes of gloves'), null,
+      'reading "2 boxes" as $2.00 would be worse than reading nothing');
+    assert.equal(parseMoney('sorted the 3 cots'), null);
+  });
+
+  test('dates are resolved against the caller\'s today, not the server\'s', () => {
+    assert.equal(parseDay('bought milk today', TODAY), '2026-08-29');
+    assert.equal(parseDay('got it yesterday', TODAY), '2026-08-28');
+    assert.equal(parseDay('3 days ago', TODAY), '2026-08-26');
+    assert.equal(parseDay('on 2026-07-04 we bought paint', TODAY), '2026-07-04');
+  });
+
+  test('a named weekday means the one that already happened', () => {
+    // TODAY is a Saturday. "Tuesday" must be the Tuesday just gone.
+    assert.equal(parseDay('we got it on Tuesday', TODAY), '2026-08-25');
+    // And "Saturday" on a Saturday means a week ago, not today — a logbook
+    // records what was done, so it never resolves to a future or ambiguous day.
+    assert.equal(parseDay('last Saturday', TODAY), '2026-08-22');
+  });
+
+  test('a month and day in the future belongs to last year', () => {
+    assert.equal(parseDay('on Dec 3', TODAY), '2025-12-03',
+      'December is not yet reached in 2026, so it must mean 2025');
+    assert.equal(parseDay('Aug 12', TODAY), '2026-08-12');
+  });
+
+  test('an unreadable date is null, so it becomes a question rather than today', () => {
+    assert.equal(parseDay('bought some milk', TODAY), null,
+      'silently defaulting to today puts a purchase on the wrong day');
+  });
+
+  test('the vendor and category come out of an ordinary sentence', () => {
+    assert.equal(parseVendor('I bought milk from Costco this morning'), 'Costco');
+    assert.equal(parseVendor('picked it up at the Dollar Store'), 'Dollar Store');
+    assert.equal(parseCategory('milk, fruit and snacks'), 'Food');
+    assert.equal(parseCategory('paint and glue for the craft table'), 'Craft supplies');
+    assert.equal(parseCategory('something unusual'), null,
+      'no confident category is better than a wrong one');
+  });
+
+  test('a whole sentence parses end to end', () => {
+    const d = parseUtterance(
+      'I bought $84.32 of milk and fruit from Costco yesterday', TODAY);
+    assert.equal(d.kind, 'purchase');
+    assert.equal(d.amountCents, 8432);
+    assert.equal(d.vendor, 'Costco');
+    assert.equal(d.happenedOn, '2026-08-28');
+    assert.equal(d.category, 'Food');
+    assert.equal(d.rawText, 'I bought $84.32 of milk and fruit from Costco yesterday');
+    assert.equal(d.summary, undefined,
+      'the description is the one part a rule should not invent');
+  });
+
+  test('gaps are questions a person can answer, and are computed by rule', () => {
+    const d = parseUtterance('bought some things', TODAY);
+    const gaps = gapsIn(d);
+    const fields = gaps.map((g) => g.field);
+    assert.ok(fields.includes('summary'));
+    assert.ok(fields.includes('happenedOn'));
+    assert.ok(fields.includes('amountCents'), 'a purchase needs an amount');
+    assert.ok(fields.includes('vendor'), 'a purchase needs a supplier');
+    for (const g of gaps) assert.match(g.question, /\?$/, 'every gap is asked as a question');
+  });
+
+  test('a note does not demand an amount or a supplier', () => {
+    const d = parseUtterance('fixed the gate latch today', TODAY);
+    assert.equal(d.kind, 'task');
+    const fields = gapsIn({ ...d, summary: 'Fixed the gate latch' }).map((g) => g.field);
+    assert.deepEqual(fields, [], 'a job that is done needs nothing else');
+  });
+});
+
+describe('logbook recording and export', () => {
+  const TODAY = '2026-08-29';
+  let actor: { type: 'user'; id: string | null; source: string };
+  let logger: Awaited<ReturnType<typeof createUser>>;
+
+  before(() => {
+    logger = createUser('logger@test.local', 'Ifeoma Castellanos', 'director', 'test-pw-1234');
+    actor = { type: 'user', id: logger.id, source: 'manual' };
+  });
+
+  test('an incomplete entry is refused rather than saved half-written', () => {
+    const d = parseUtterance('bought some things', TODAY);
+    assert.throws(() => logRecord(d, actor), /Still missing/);
+  });
+
+  test('a complete entry saves, keeps what was said, and hits the event log', () => {
+    const said = 'I bought $84.32 of milk and fruit from Costco yesterday';
+    const d = parseUtterance(said, TODAY);
+    const saved = logRecord({ ...d, summary: 'Milk and fruit' }, actor);
+
+    assert.equal(saved.amount_cents, 8432);
+    assert.equal(saved.vendor, 'Costco');
+    assert.equal(saved.happened_on, '2026-08-28');
+    assert.equal(saved.raw_text, said,
+      'the original sentence survives whatever the parser made of it');
+
+    const events = timelineFor('logbook', String(saved.id), 5);
+    assert.ok(events.some((e) => e.type === 'created'));
+  });
+
+  test('recall finds it by what was said, not only by the tidy fields', () => {
+    const hits = logRecall('costco');
+    assert.ok(hits.length >= 1);
+    assert.equal(hits[0]?.vendor, 'Costco');
+    // A search box full of FTS operators must not 500.
+    assert.doesNotThrow(() => logRecall('"*(){} ^costco'));
+  });
+
+  test('totals say "not measured" for an empty range instead of a confident zero', () => {
+    const empty = logTotals({ from: '1999-01-01', to: '1999-12-31' });
+    assert.equal(empty.measured, false);
+    assert.equal(empty.spentCents, null,
+      '$0.00 reads as "you spent nothing", which is a different claim');
+
+    const real = logTotals({});
+    assert.equal(real.measured, true);
+    assert.ok(Number(real.spentCents) >= 8432);
+  });
+
+  test('a correction keeps the original in the append-only log', () => {
+    const d = parseUtterance('bought $10.00 of glue from Michaels today', TODAY);
+    const saved = logRecord({ ...d, summary: 'Glue' }, actor);
+    const fixed = logUpdate(String(saved.id), { amountCents: 1250 }, actor);
+    assert.equal(fixed.amount_cents, 1250);
+
+    const events = timelineFor('logbook', String(saved.id), 10);
+    const edit = events.find((e) => e.type === 'updated');
+    assert.ok(edit, 'the correction is recorded');
+    assert.match(edit.before_json ?? '', /1000/, 'and so is what it used to say');
+  });
+
+  test('the workbook is a real xlsx, with a sheet per cut', () => {
+    const buf = logWorkbook({});
+    assert.ok(buf.length > 1000);
+    // PK\x03\x04 — it is a zip, which is what xlsx is.
+    assert.equal(buf.subarray(0, 4).toString('binary'), 'PK');
+
+    const text = buf.toString('binary');
+    assert.ok(text.includes('[Content_Types].xml'), 'the OPC content types part is present');
+    assert.ok(text.includes('xl/worksheets/sheet4.xml'), 'all four sheets are in the package');
+  });
+
+  test('a cell full of XML metacharacters does not corrupt the file', () => {
+    const nasty = 'Paint & brushes <for> "art" & craft ';
+    const d = parseUtterance('bought $5.00 of things from Michaels today', TODAY);
+    logRecord({ ...d, summary: nasty }, actor);
+
+    const buf = logWorkbook({});
+    assert.equal(buf.subarray(0, 4).toString('binary'), 'PK',
+      'an ampersand in a description must not produce a workbook Excel refuses to open');
+    assert.ok(buf.length > 1000);
   });
 });
