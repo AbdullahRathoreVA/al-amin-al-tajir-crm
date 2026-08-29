@@ -36,6 +36,7 @@ import {
 import { ingest } from './ingest/pipeline.ts';
 import { parseUtterance, gapsIn, record as logRecord, update as logUpdate, list as logList,
          totals as logTotals, recall as logRecall, workbook as logWorkbook,
+         remove as logRemove, restore as logRestore, removed as logRemoved,
          LogbookError, type LogKind, type LogDraft } from './core/logbook.ts';
 
 export const router = new Router();
@@ -1260,4 +1261,24 @@ router.get('/api/v1/logbook/workbook', (c) => {
     base64: buf.toString('base64'),
     bytes: buf.length,
   };
+});
+
+/**
+ * Remove an entry. POST rather than DELETE because the router speaks GET, POST
+ * and PATCH — and because this is reversible, which DELETE would imply it is not.
+ */
+router.post('/api/v1/logbook/:id/remove', (c) => {
+  c.require('logbook:write');
+  return logbook(() => logRemove(c.params.id!, actorOf(c)));
+});
+
+router.post('/api/v1/logbook/:id/restore', (c) => {
+  c.require('logbook:write');
+  return logbook(() => logRestore(c.params.id!, actorOf(c)));
+});
+
+/** The bin, so a removed entry can be found again rather than only regretted. */
+router.get('/api/v1/logbook/removed', (c) => {
+  c.require('logbook:read');
+  return { removed: logRemoved() };
 });

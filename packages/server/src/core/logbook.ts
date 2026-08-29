@@ -318,13 +318,17 @@ export function recall(query: string, limit = 25): Record<string, unknown>[] {
   if (!match) return [];
   return plainAll(many<Record<string, unknown>>(
     `SELECT e.* FROM logbook_fts f JOIN logbook_entries e ON e.id = f.entry_id
-      WHERE logbook_fts MATCH ? ORDER BY e.happened_on DESC LIMIT ?`, match, limit));
+      WHERE logbook_fts MATCH ? AND e.deleted_at IS NULL
+      ORDER BY e.happened_on DESC LIMIT ?`, match, limit));
 }
 
 export interface ListFilter { from?: string; to?: string; kind?: LogKind; category?: string }
 
 export function list(filter: ListFilter = {}, limit = 500): Record<string, unknown>[] {
-  const where: string[] = [];
+  // Removed entries are excluded here, in the one query every read goes
+  // through, rather than in each caller. A total that quietly included a
+  // deleted row is the exact failure this is meant to prevent.
+  const where: string[] = ['e.deleted_at IS NULL'];
   const params: (string | number)[] = [];
   if (filter.from) { where.push('e.happened_on >= ?'); params.push(filter.from); }
   if (filter.to) { where.push('e.happened_on <= ?'); params.push(filter.to); }
@@ -336,7 +340,7 @@ export function list(filter: ListFilter = {}, limit = 500): Record<string, unkno
        FROM logbook_entries e
        LEFT JOIN classrooms c ON c.id = e.classroom_id
        LEFT JOIN users u ON u.id = e.created_by
-      ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+      WHERE ${where.join(' AND ')}
       ORDER BY e.happened_on DESC, e.created_at DESC
       LIMIT ?`, ...params, limit));
 }
@@ -437,4 +441,76 @@ function group(
     map.set(key, acc);
   }
   return [...map.values()].sort((a, b) => b.cents - a.cents || a.key.localeCompare(b.key));
+}
+
+// -------------------------------------------------------------------- remove
+
+/**
+ * Take an entry out of the book.
+ *
+ * The row stays; it is marked and disappears from every read — the list, the
+ * totals, search and the spreadsheet all go through queries that exclude it.
+ * A ledger whose rows can evaporate is a ledger whose total silently stops
+ * matching the receipts, and "I'm sure I entered that" becomes unanswerable.
+ *
+ * The event log records what it said at the moment it was removed, so the
+ * deletion is as legible afterwards as the entry was.
+ */
+export function remove(id: string, actor: Actor): Record<string, unknown> {
+  const entry = plain(one<Record<string, unknown>>(
+    'SELECT * FROM logbook_entries WHERE id = ?', id));
+  if (!entry) throw new LogbookError('No such logbook entry');
+  if (entry.deleted_at) throw new LogbookError('That entry was already removed');
+
+  const now = nowIso();
+  let after!: Record<string, unknown>;
+  tx(() => {
+    run('UPDATE logbook_entries SET deleted_at = ?, deleted_by = ?, updated_at = ? WHERE id = ?',
+      now, actor.id, now, id);
+    // Out of the search index too: finding a removed entry and being unable to
+    // open it is worse than not finding it.
+    run('DELETE FROM logbook_fts WHERE entry_id = ?', id);
+
+    after = plain(one<Record<string, unknown>>('SELECT * FROM logbook_entries WHERE id = ?', id))!;
+    recordEvent({
+      entityType: 'logbook', entityId: id, type: 'deleted', actor,
+      summary: `Removed from the logbook: ${String(entry.summary)}`
+             + (entry.amount_cents ? ` (${money(Number(entry.amount_cents))})` : ''),
+      before: entry, after: null,
+    });
+  });
+  return after;
+}
+
+/** Put it back. What people want about four seconds after pressing delete. */
+export function restore(id: string, actor: Actor): Record<string, unknown> {
+  const entry = plain(one<Record<string, unknown>>(
+    'SELECT * FROM logbook_entries WHERE id = ?', id));
+  if (!entry) throw new LogbookError('No such logbook entry');
+  if (!entry.deleted_at) throw new LogbookError('That entry is not removed');
+
+  let after!: Record<string, unknown>;
+  tx(() => {
+    run('UPDATE logbook_entries SET deleted_at = NULL, deleted_by = NULL, updated_at = ? WHERE id = ?',
+      nowIso(), id);
+    after = plain(one<Record<string, unknown>>('SELECT * FROM logbook_entries WHERE id = ?', id))!;
+    run('DELETE FROM logbook_fts WHERE entry_id = ?', id);
+    run('INSERT INTO logbook_fts (entry_id, body) VALUES (?,?)', id,
+      [after.summary, after.vendor, after.category, after.raw_text].filter(Boolean).join(' '));
+    recordEvent({
+      entityType: 'logbook', entityId: id, type: 'restored', actor,
+      summary: `Put back into the logbook: ${String(after.summary)}`,
+      before: null, after,
+    });
+  });
+  return after;
+}
+
+/** What has been removed, so it can be found again rather than only regretted. */
+export function removed(limit = 50): Record<string, unknown>[] {
+  return plainAll(many<Record<string, unknown>>(
+    `SELECT e.*, u.name AS deleted_by_name
+       FROM logbook_entries e LEFT JOIN users u ON u.id = e.deleted_by
+      WHERE e.deleted_at IS NOT NULL
+      ORDER BY e.deleted_at DESC LIMIT ?`, limit));
 }

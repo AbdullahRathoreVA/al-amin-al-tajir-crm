@@ -217,6 +217,42 @@ export function Logbook() {
     } finally { setBusy(false); }
   }
 
+  const [editing, setEditing] = useState<string | null>(null);
+  const [undo, setUndo] = useState<{ id: string; summary: string } | null>(null);
+  const [binOpen, setBinOpen] = useState(false);
+  const bin = useApi<{ removed: Entry[] }>(binOpen ? '/logbook/removed' : null, [binOpen]);
+
+  async function act(path: string, body?: unknown) {
+    setBusy(true); setError(null);
+    try {
+      await api.post(path, body ?? {});
+      res.reload();
+      if (binOpen) bin.reload();
+      return true;
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'That did not work.');
+      return false;
+    } finally { setBusy(false); }
+  }
+
+  async function saveEdit(id: string, patch: Record<string, unknown>) {
+    setBusy(true); setError(null);
+    try {
+      await api.patch(`/logbook/${id}`, patch);
+      setEditing(null);
+      res.reload();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'That edit did not save.');
+    } finally { setBusy(false); }
+  }
+
+  async function removeEntry(e: Entry) {
+    // Offer the undo immediately. It is what people want about four seconds
+    // after pressing remove, and a confirm dialog beforehand does not help
+    // because nobody reads it.
+    if (await act(`/logbook/${e.id}/remove`)) setUndo({ id: e.id, summary: e.summary });
+  }
+
   const entries = res.data?.entries ?? [];
   const totals = res.data?.totals;
   const field = 'w-full rounded-lg border px-3 py-2.5 text-sm outline-none';
@@ -353,6 +389,20 @@ export function Logbook() {
       )}
 
       {/* ---------------------------------------------------------- entries */}
+      {undo && (
+        <div className="flex flex-wrap items-center gap-3 rounded-lg border px-4 py-2.5"
+             style={{ borderColor: 'var(--line-strong)', background: 'var(--surface-sunken)' }}>
+          <span className="flex-1 text-[13px]">
+            Removed “{undo.summary}”. It is out of the totals and the spreadsheet.
+          </span>
+          <Button size="sm" variant="ghost" disabled={busy}
+                  onClick={async () => { if (await act(`/logbook/${undo.id}/restore`)) setUndo(null); }}>
+            Put it back
+          </Button>
+          <Button size="sm" variant="ghost" onClick={() => setUndo(null)}>Dismiss</Button>
+        </div>
+      )}
+
       <Panel title="Written down" pad={false}>
         {res.loading && !res.data && <Spinner label="Loading the logbook" />}
         {res.error && <ErrorNote error={res.error} retry={res.reload} />}
@@ -362,25 +412,49 @@ export function Logbook() {
         )}
         <div className="flex flex-col divide-y" style={{ borderColor: 'var(--line)' }}>
           {entries.map((e) => (
-            <div key={e.id} className="flex flex-wrap items-baseline gap-x-3 gap-y-1 px-4 py-3">
-              <span className="tabular text-[12px]" style={{ color: 'var(--text-faint)' }}>
-                {e.happened_on}
-              </span>
-              <Badge tone={KIND_TONE[e.kind] ?? 'neutral'}>{e.kind}</Badge>
-              <span className="min-w-0 flex-1 text-[13px] font-medium">{e.summary}</span>
-              {e.vendor && (
-                <span className="text-[12px]" style={{ color: 'var(--text-muted)' }}>{e.vendor}</span>
-              )}
-              {e.category && (
-                <span className="text-[11px]" style={{ color: 'var(--text-faint)' }}>{e.category}</span>
-              )}
-              {e.source === 'voice' && (
-                <span className="text-[11px]" style={{ color: 'var(--text-faint)' }} title="Recorded by voice">spoken</span>
-              )}
-              <span className="tabular text-[13px] font-semibold">{money(e.amount_cents)}</span>
-            </div>
+            <EntryRow
+              key={e.id} entry={e} busy={busy}
+              editing={editing === e.id}
+              onEdit={() => setEditing(e.id)}
+              onCancel={() => setEditing(null)}
+              onSave={(patch) => void saveEdit(e.id, patch)}
+              onRemove={() => void removeEntry(e)}
+            />
           ))}
         </div>
+      </Panel>
+
+      {/* -------------------------------------------------------------- bin */}
+      <Panel pad={false}>
+        <button
+          onClick={() => setBinOpen((o) => !o)}
+          className="flex w-full items-center justify-between px-4 py-3 text-left text-[13px] font-medium"
+          aria-expanded={binOpen}
+        >
+          <span>Removed entries</span>
+          <span style={{ color: 'var(--text-faint)' }}>{binOpen ? 'Hide' : 'Show'}</span>
+        </button>
+        {binOpen && (
+          <div className="border-t" style={{ borderColor: 'var(--line)' }}>
+            {bin.loading && <Spinner label="Looking in the bin" />}
+            {bin.error && <ErrorNote error={bin.error} retry={bin.reload} />}
+            {bin.data && !bin.data.removed.length && (
+              <p className="px-4 py-5 text-center text-[13px]" style={{ color: 'var(--text-muted)' }}>
+                Nothing has been removed.
+              </p>
+            )}
+            {bin.data?.removed.map((e) => (
+              <div key={e.id} className="flex flex-wrap items-baseline gap-x-3 gap-y-1 border-b px-4 py-2.5 last:border-b-0"
+                   style={{ borderColor: 'var(--line)' }}>
+                <span className="tabular text-[12px]" style={{ color: 'var(--text-faint)' }}>{e.happened_on}</span>
+                <span className="min-w-0 flex-1 text-[13px]" style={{ color: 'var(--text-muted)' }}>{e.summary}</span>
+                <span className="tabular text-[12px]" style={{ color: 'var(--text-faint)' }}>{money(e.amount_cents)}</span>
+                <Button size="sm" variant="ghost" disabled={busy}
+                        onClick={() => void act(`/logbook/${e.id}/restore`)}>Put back</Button>
+              </div>
+            ))}
+          </div>
+        )}
       </Panel>
     </div>
   );
@@ -394,6 +468,116 @@ function Understood({ label, value }: { label: string; value?: string | null }) 
       <dd className={value ? '' : 'italic'} style={{ color: value ? 'var(--text)' : 'var(--text-faint)' }}>
         {value || 'still to come'}
       </dd>
+    </div>
+  );
+}
+
+/**
+ * One line of the book, which becomes a small form when you edit it.
+ *
+ * Editing in place rather than in a dialog: a correction is usually one field
+ * and the row you are fixing is the context you need to fix it.
+ */
+function EntryRow(
+  { entry, busy, editing, onEdit, onCancel, onSave, onRemove }: {
+    entry: Entry;
+    busy: boolean;
+    editing: boolean;
+    onEdit: () => void;
+    onCancel: () => void;
+    onSave: (patch: Record<string, unknown>) => void;
+    onRemove: () => void;
+  },
+) {
+  const [summary, setSummary] = useState(entry.summary);
+  const [vendor, setVendor] = useState(entry.vendor ?? '');
+  const [category, setCategory] = useState(entry.category ?? '');
+  const [day, setDay] = useState(entry.happened_on);
+  const [amount, setAmount] = useState(
+    entry.amount_cents === null ? '' : (entry.amount_cents / 100).toFixed(2));
+  const [localError, setLocalError] = useState<string | null>(null);
+
+  const field = 'rounded-lg border px-2.5 py-1.5 text-[13px] outline-none';
+  const fieldStyle = {
+    borderColor: 'var(--line-strong)', background: 'var(--surface-sunken)', color: 'var(--text)',
+  };
+
+  function submit() {
+    if (!summary.trim()) { setLocalError('It needs a description.'); return; }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) { setLocalError('The date must look like 2026-08-29.'); return; }
+
+    let cents: number | null = null;
+    if (amount.trim()) {
+      // Parsed here as well as on the server, so a typo is caught in front of
+      // the person who made it rather than after a round trip.
+      const n = Number(amount.replace(/[^0-9.]/g, ''));
+      if (!Number.isFinite(n) || n < 0) { setLocalError('Give an amount like 84.32.'); return; }
+      cents = Math.round(n * 100);
+    }
+    setLocalError(null);
+    onSave({
+      summary: summary.trim(),
+      vendor: vendor.trim() || null,
+      category: category.trim() || null,
+      happenedOn: day,
+      amountCents: cents,
+    });
+  }
+
+  if (!editing) {
+    return (
+      <div className="group flex flex-wrap items-baseline gap-x-3 gap-y-1 px-4 py-3">
+        <span className="tabular text-[12px]" style={{ color: 'var(--text-faint)' }}>
+          {entry.happened_on}
+        </span>
+        <Badge tone={KIND_TONE[entry.kind] ?? 'neutral'}>{entry.kind}</Badge>
+        <span className="min-w-0 flex-1 text-[13px] font-medium">{entry.summary}</span>
+        {entry.vendor && (
+          <span className="text-[12px]" style={{ color: 'var(--text-muted)' }}>{entry.vendor}</span>
+        )}
+        {entry.category && (
+          <span className="text-[11px]" style={{ color: 'var(--text-faint)' }}>{entry.category}</span>
+        )}
+        {entry.source === 'voice' && (
+          <span className="text-[11px]" style={{ color: 'var(--text-faint)' }} title="Recorded by voice">spoken</span>
+        )}
+        <span className="tabular text-[13px] font-semibold">{money(entry.amount_cents)}</span>
+        <span className="flex gap-1">
+          <Button size="sm" variant="ghost" onClick={onEdit} disabled={busy}>Edit</Button>
+          <Button size="sm" variant="ghost" onClick={onRemove} disabled={busy}>Remove</Button>
+        </span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-2 px-4 py-3" style={{ background: 'var(--surface-sunken)' }}>
+      <div className="flex flex-wrap gap-2">
+        <input aria-label="Day" value={day} onChange={(e) => setDay(e.target.value)}
+               className={`${field} w-32`} style={fieldStyle} />
+        <input aria-label="What" value={summary} onChange={(e) => setSummary(e.target.value)}
+               className={`${field} min-w-48 flex-1`} style={fieldStyle} autoFocus />
+        <input aria-label="Where" value={vendor} onChange={(e) => setVendor(e.target.value)}
+               placeholder="Where" className={`${field} w-36`} style={fieldStyle} />
+        <input aria-label="Category" value={category} onChange={(e) => setCategory(e.target.value)}
+               placeholder="Category" className={`${field} w-36`} style={fieldStyle} />
+        <input aria-label="Amount" value={amount} onChange={(e) => setAmount(e.target.value)}
+               placeholder="0.00" inputMode="decimal" className={`${field} w-24 text-right`} style={fieldStyle} />
+      </div>
+
+      {/* What was actually said, so a wrong parse can be corrected from it. */}
+      <p className="text-[11px]" style={{ color: 'var(--text-faint)' }}>
+        You said: “{entry.raw_text}”
+      </p>
+
+      {localError && (
+        <p className="text-[12px]" style={{ color: 'var(--color-crit-400)' }}>{localError}</p>
+      )}
+
+      <div className="flex gap-1.5">
+        <Button size="sm" variant="primary" onClick={submit} disabled={busy}>Save changes</Button>
+        <Button size="sm" variant="ghost" onClick={onCancel} disabled={busy}>Cancel</Button>
+      </div>
     </div>
   );
 }

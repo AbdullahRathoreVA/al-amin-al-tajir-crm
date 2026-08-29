@@ -55,7 +55,8 @@ const { familyTimeline } = await import('../packages/server/src/core/events.ts')
 const actorFor = (u: { id: string }) => ({ type: 'user' as const, id: u.id, source: 'manual' });
 const { parseMoney, parseDay, parseVendor, parseCategory, parseUtterance, gapsIn,
         record: logRecord, update: logUpdate, recall: logRecall, totals: logTotals,
-        workbook: logWorkbook } = await import('../packages/server/src/core/logbook.ts');
+        workbook: logWorkbook, list: logList, remove: logRemove, restore: logRestore,
+        removed: logRemoved } = await import('../packages/server/src/core/logbook.ts');
 
 before(async () => {
   await connect();
@@ -1794,5 +1795,77 @@ describe('logbook recording and export', () => {
     assert.equal(buf.subarray(0, 4).toString('binary'), 'PK',
       'an ampersand in a description must not produce a workbook Excel refuses to open');
     assert.ok(buf.length > 1000);
+  });
+});
+
+
+describe('removing a logbook entry', () => {
+  const TODAY = '2026-08-29';
+  let actor: { type: 'user'; id: string | null; source: string };
+  let entryId: string;
+
+  before(() => {
+    const u = createUser('binner@test.local', 'Halima Sørensen', 'director', 'test-pw-1234');
+    actor = { type: 'user', id: u.id, source: 'manual' };
+  });
+
+  test('a removed entry leaves the list, the search and the totals', () => {
+    const before = logTotals({});
+    const saved = logRecord(
+      { ...parseUtterance('bought $30.00 of tape from Staples today', TODAY), summary: 'Masking tape' },
+      actor);
+    entryId = String(saved.id);
+
+    const withIt = logTotals({});
+    assert.equal(Number(withIt.spentCents), Number(before.spentCents) + 3000);
+    assert.ok(logRecall('masking').length >= 1, 'findable while it is in the book');
+
+    logRemove(entryId, actor);
+
+    const after = logTotals({});
+    assert.equal(Number(after.spentCents), Number(before.spentCents),
+      'a total that still counted a removed row is the whole failure this guards against');
+    assert.equal(logList({}).some((e) => e.id === entryId), false, 'gone from the list');
+    assert.equal(logRecall('masking').length, 0, 'and out of the search index');
+  });
+
+  test('the row is still there, and the event log says who removed it', () => {
+    const events = timelineFor('logbook', entryId, 10);
+    const gone = events.find((e) => e.type === 'deleted');
+    assert.ok(gone, 'the removal is recorded');
+    assert.match(gone.summary ?? '', /Masking tape/,
+      'and the log says what it said, not just that something went');
+    assert.match(gone.before_json ?? '', /3000/, 'including the amount it was carrying');
+  });
+
+  test('it shows up in the bin rather than only being regretted', () => {
+    const bin = logRemoved();
+    const found = bin.find((e) => e.id === entryId);
+    assert.ok(found, 'a removed entry is findable');
+    assert.equal(found.deleted_by_name, 'Halima Sørensen');
+  });
+
+  test('the spreadsheet stops counting it too', () => {
+    const buf = logWorkbook({});
+    assert.equal(buf.subarray(0, 2).toString('binary'), 'PK');
+    assert.equal(buf.toString('binary').includes('Masking tape'), false,
+      'an export that still carried a removed row would contradict the screen');
+  });
+
+  test('restoring puts it back, in the list and the total', () => {
+    const before = logTotals({});
+    logRestore(entryId, actor);
+    const after = logTotals({});
+    assert.equal(Number(after.spentCents), Number(before.spentCents) + 3000);
+    assert.ok(logList({}).some((e) => e.id === entryId), 'back in the list');
+    assert.ok(logRecall('masking').length >= 1, 'and back in the search index');
+  });
+
+  test('removing twice, or restoring what is not removed, is refused clearly', () => {
+    assert.throws(() => logRestore(entryId, actor), /not removed/);
+    logRemove(entryId, actor);
+    assert.throws(() => logRemove(entryId, actor), /already removed/);
+    assert.throws(() => logRemove(randomUUID(), actor), /No such logbook entry/);
+    logRestore(entryId, actor); // leave the book as we found it
   });
 });
