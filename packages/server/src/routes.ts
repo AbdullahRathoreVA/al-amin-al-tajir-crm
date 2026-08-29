@@ -31,6 +31,8 @@ import { listTargets, upsertTarget, runChannel, recentRuns as syncRuns, channelS
 import {
   listClassrooms, assignStaff, unassignStaff, staffFor, register, mark, checkOut,
   roomStandings, daySummary, logRegisterRead, today, isDay, AttendanceError,
+  createClassroom, updateClassroom, assignChild, unplacedChildren,
+  setRatio, clearRatio, programsWithRatios, assignableStaff, staffByClassroom,
   type AttendanceStatus,
 } from './core/attendance.ts';
 import { ingest } from './ingest/pipeline.ts';
@@ -1281,4 +1283,65 @@ router.post('/api/v1/logbook/:id/restore', (c) => {
 router.get('/api/v1/logbook/removed', (c) => {
   c.require('logbook:read');
   return { removed: logRemoved() };
+});
+
+// ------------------------------------------------------ setting the register up
+
+/**
+ * Everything needed to get from an empty register to a working one, on one
+ * screen: the rooms, the children not yet in one, and the ratios.
+ */
+router.get('/api/v1/classrooms/setup', (c) => {
+  const user = c.require('classroom:read');
+  // Staff names are only sent to someone who can actually assign them. An
+  // educator reading this screen has no need for a roster of their colleagues.
+  const mayAssign = can(user, 'classroom:write');
+  return {
+    classrooms: listClassrooms(user),
+    unplaced: unplacedChildren(),
+    programs: programsWithRatios(),
+    assignable: mayAssign ? assignableStaff() : [],
+    staff: mayAssign ? staffByClassroom() : {},
+  };
+});
+
+router.post('/api/v1/classrooms', (c) => {
+  c.require('classroom:write');
+  const b = requireBody<{ name?: string; programId?: string | null; capacity?: number | null }>(c);
+  if (!b.name) throw badRequest('name is required');
+  return attendance(() => createClassroom(b.name!, {
+    programId: b.programId ?? null,
+    capacity: b.capacity ?? null,
+  }, actorOf(c)));
+});
+
+router.patch('/api/v1/classrooms/:id', (c) => {
+  c.require('classroom:write');
+  const b = requireBody<{
+    name?: string; programId?: string | null; capacity?: number | null; active?: boolean;
+  }>(c);
+  return attendance(() => updateClassroom(c.params.id!, b, actorOf(c)));
+});
+
+/** Place a child in a room, and enrol them, in one go. */
+router.patch('/api/v1/children/:id/placement', (c) => {
+  c.require('child:write');
+  const b = requireBody<{ classroomId?: string | null; status?: string }>(c);
+  return attendance(() => assignChild(c.params.id!, b, actorOf(c)));
+});
+
+router.patch('/api/v1/programs/:id/ratio', (c) => {
+  c.require('classroom:write');
+  const b = requireBody<{ childrenPerStaff?: number | null; source?: string }>(c);
+
+  if (b.childrenPerStaff === null) {
+    // Removing a ratio is a real choice, not a failure: the room goes back to
+    // reporting "not measured", which is the honest state.
+    return { cleared: clearRatio(c.params.id!, actorOf(c)) };
+  }
+  if (typeof b.childrenPerStaff !== 'number') {
+    throw badRequest('childrenPerStaff must be a number, or null to remove the rule');
+  }
+  return attendance(() => setRatio(
+    c.params.id!, b.childrenPerStaff!, b.source ?? null, actorOf(c)));
 });

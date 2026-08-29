@@ -18,6 +18,7 @@ import { Link } from '../lib/router.tsx';
 import {
   Panel, Button, Badge, Stat, Spinner, ErrorNote, Empty, NotMeasured, clockTime, toneForStatus,
 } from '../ui/kit.tsx';
+import { RegisterSetup } from './RegisterSetup.tsx';
 
 interface RegisterRow {
   child_id: string;
@@ -60,6 +61,7 @@ export function Attendance() {
   const reg = useApi<{ day: string; register: RegisterRow[]; summary: Summary }>(
     `/attendance?day=${day}`, [day]);
   const rooms = useApi<{ rooms: Standing[] }>(`/attendance/standings?day=${day}`, [day]);
+  const me = useApi<{ capabilities: string[] }>('/auth/me');
 
   async function act(childId: string, body: Record<string, unknown>, path: string) {
     setBusy(childId); setError(null);
@@ -112,6 +114,11 @@ export function Attendance() {
         </div>
       )}
 
+      <RegisterSetup
+        canEdit={me.data?.capabilities.includes('classroom:write') ?? false}
+        onChanged={() => { reg.reload(); rooms.reload(); }}
+      />
+
       {/* ------------------------------------------------------------ ratios */}
       <Panel title="Rooms">
         {rooms.loading && <Spinner label="Working out the rooms" />}
@@ -159,7 +166,9 @@ export function Attendance() {
         {reg.data && rows.length === 0 && (
           <Empty
             title="Nobody to show"
-            hint="An educator sees the children in the rooms they are assigned to. If this is unexpected, ask a director to check your room assignment."
+            hint={(rooms.data?.rooms.length ?? 0) === 0
+              ? 'There are no rooms yet. Open “Rooms and ratios” above to make one and put the children in it.'
+              : 'An educator sees the children in the rooms they are assigned to. If this is unexpected, ask a director to check your room assignment.'}
           />
         )}
         <div className="flex flex-col divide-y" style={{ borderColor: 'var(--line)' }}>

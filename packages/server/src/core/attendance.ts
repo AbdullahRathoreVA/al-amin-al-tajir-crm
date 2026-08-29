@@ -381,3 +381,229 @@ export function daySummary(user: User, day: string): Record<string, unknown> {
 export function logRegisterRead(user: User, day: string, classroomId?: string): void {
   logAccess(user.id, 'view_register', 'attendance', classroomId ?? day);
 }
+
+// -------------------------------------------------------------------- set-up
+
+/**
+ * Creating rooms, placing children, setting ratios.
+ *
+ * These exist because the register shipped without them and was therefore
+ * unusable: correct permission boundaries and honest ratios, over a screen that
+ * could only ever be empty. A feature nobody can switch on is not a feature,
+ * and it took looking at production to notice.
+ */
+
+export function createClassroom(
+  name: string, opts: { programId?: string | null; capacity?: number | null }, actor: Actor,
+): Record<string, unknown> {
+  const label = name.trim();
+  if (!label) throw new AttendanceError('A room needs a name');
+  if (opts.capacity !== undefined && opts.capacity !== null
+      && (!Number.isInteger(opts.capacity) || opts.capacity <= 0)) {
+    throw new AttendanceError('Capacity must be a whole number of places, or left blank');
+  }
+
+  const id = newId();
+  tx(() => {
+    run(`INSERT INTO classrooms (id, name, program_id, capacity, active, created_at)
+         VALUES (?,?,?,?,1,?)`,
+      id, label, opts.programId ?? null, opts.capacity ?? null, nowIso());
+    recordEvent({
+      entityType: 'classroom', entityId: id, type: 'created', actor,
+      summary: `Room "${label}" created`,
+      before: null, after: { name: label, capacity: opts.capacity ?? null },
+    });
+  });
+  return plain(one<Record<string, unknown>>('SELECT * FROM classrooms WHERE id = ?', id))!;
+}
+
+export function updateClassroom(
+  id: string,
+  patch: { name?: string; programId?: string | null; capacity?: number | null; active?: boolean },
+  actor: Actor,
+): Record<string, unknown> {
+  const before = plain(one<Record<string, unknown>>('SELECT * FROM classrooms WHERE id = ?', id));
+  if (!before) throw new AttendanceError('No such room');
+
+  const sets: string[] = [];
+  const params: (string | number | null)[] = [];
+  if (patch.name !== undefined) {
+    if (!patch.name.trim()) throw new AttendanceError('A room needs a name');
+    sets.push('name = ?'); params.push(patch.name.trim());
+  }
+  if (patch.programId !== undefined) { sets.push('program_id = ?'); params.push(patch.programId); }
+  if (patch.capacity !== undefined) { sets.push('capacity = ?'); params.push(patch.capacity); }
+  if (patch.active !== undefined) { sets.push('active = ?'); params.push(patch.active ? 1 : 0); }
+  if (!sets.length) return before;
+
+  let after!: Record<string, unknown>;
+  tx(() => {
+    run(`UPDATE classrooms SET ${sets.join(', ')} WHERE id = ?`, ...params, id);
+    after = plain(one<Record<string, unknown>>('SELECT * FROM classrooms WHERE id = ?', id))!;
+    recordEvent({
+      entityType: 'classroom', entityId: id, type: 'updated', actor,
+      // Closing a room hides its register from everyone assigned to it, which
+      // is a permission change and deserves to read like one in the log.
+      summary: patch.active === false
+        ? `Room "${String(after.name)}" closed, and its register is no longer shown`
+        : `Room "${String(after.name)}" updated`,
+      before, after,
+    });
+  });
+  return after;
+}
+
+/**
+ * Put a child in a room, and optionally enrol them.
+ *
+ * Both in one transaction because doing them separately has a trap: the
+ * register only lists enrolled children, so a child placed but not enrolled is
+ * invisible, and whoever placed them would reasonably conclude it did not work.
+ */
+export function assignChild(
+  childId: string,
+  patch: { classroomId?: string | null; status?: string },
+  actor: Actor,
+): Record<string, unknown> {
+  const before = plain(one<Record<string, unknown>>(
+    'SELECT id, first_name, classroom_id, status FROM children WHERE id = ?', childId));
+  if (!before) throw new AttendanceError('No such child');
+
+  if (patch.classroomId) {
+    const room = one<{ id: string; active: number }>(
+      'SELECT id, active FROM classrooms WHERE id = ?', patch.classroomId);
+    if (!room) throw new AttendanceError('No such room');
+    if (!room.active) throw new AttendanceError('That room is closed');
+  }
+  const STATUSES = ['prospective', 'waitlisted', 'offered', 'enrolled', 'withdrawn'];
+  if (patch.status !== undefined && !STATUSES.includes(patch.status)) {
+    throw new AttendanceError(`status must be one of ${STATUSES.join(', ')}`);
+  }
+
+  const sets: string[] = [];
+  const params: (string | number | null)[] = [];
+  if (patch.classroomId !== undefined) { sets.push('classroom_id = ?'); params.push(patch.classroomId); }
+  if (patch.status !== undefined) { sets.push('status = ?'); params.push(patch.status); }
+  if (!sets.length) return before;
+
+  let after!: Record<string, unknown>;
+  tx(() => {
+    run(`UPDATE children SET ${sets.join(', ')}, updated_at = ? WHERE id = ?`,
+      ...params, nowIso(), childId);
+    after = plain(one<Record<string, unknown>>(
+      'SELECT id, first_name, classroom_id, status FROM children WHERE id = ?', childId))!;
+    const roomName = after.classroom_id
+      ? one<{ name: string }>('SELECT name FROM classrooms WHERE id = ?',
+          String(after.classroom_id))?.name
+      : null;
+    recordEvent({
+      entityType: 'child', entityId: childId, type: 'placed', actor,
+      summary: roomName
+        ? `${String(before.first_name)} placed in ${roomName}`
+          + (patch.status ? ` and marked ${patch.status}` : '')
+        : `${String(before.first_name)} taken out of their room`,
+      before, after,
+    });
+  });
+  return after;
+}
+
+/** Children with no room yet: the list somebody has to work through once. */
+export function unplacedChildren(limit = 200): Record<string, unknown>[] {
+  return plainAll(many<Record<string, unknown>>(
+    `SELECT ch.id, ch.first_name, ch.last_name, ch.age_band, ch.status,
+            f.id AS family_id, f.name AS family_name
+       FROM children ch JOIN families f ON f.id = ch.family_id
+      WHERE ch.classroom_id IS NULL AND ch.status <> 'withdrawn'
+      ORDER BY f.name, ch.first_name LIMIT ?`, limit));
+}
+
+/**
+ * The supervision ratio for a program, as one adult to N children.
+ *
+ * `source` is stored because the number comes from provincial regulation, and
+ * the next person to look at it will want to know which rule it came from
+ * rather than who typed it.
+ */
+export function setRatio(
+  programId: string, childrenPerStaff: number, source: string | null, actor: Actor,
+): Record<string, unknown> {
+  if (!Number.isInteger(childrenPerStaff) || childrenPerStaff <= 0) {
+    throw new AttendanceError('A ratio is one adult to a whole number of children');
+  }
+  const program = one<{ name: string }>('SELECT name FROM programs WHERE id = ?', programId);
+  if (!program) throw new AttendanceError('No such program');
+
+  const before = plain(one<Record<string, unknown>>(
+    'SELECT * FROM ratio_rules WHERE program_id = ?', programId));
+  tx(() => {
+    run(`INSERT INTO ratio_rules (program_id, children_per_staff, source, updated_at)
+         VALUES (?,?,?,?)
+         ON CONFLICT(program_id) DO UPDATE SET children_per_staff = excluded.children_per_staff,
+           source = excluded.source, updated_at = excluded.updated_at`,
+      programId, childrenPerStaff, source?.trim() || null, nowIso());
+    recordEvent({
+      entityType: 'program', entityId: programId, type: 'updated', actor,
+      summary: `${program.name} ratio set to one adult per ${childrenPerStaff} children`,
+      before, after: { childrenPerStaff, source: source ?? null },
+    });
+  });
+  return plain(one<Record<string, unknown>>(
+    'SELECT * FROM ratio_rules WHERE program_id = ?', programId))!;
+}
+
+export function clearRatio(programId: string, actor: Actor): boolean {
+  const before = plain(one<Record<string, unknown>>(
+    'SELECT * FROM ratio_rules WHERE program_id = ?', programId));
+  if (!before) return false;
+  tx(() => {
+    run('DELETE FROM ratio_rules WHERE program_id = ?', programId);
+    recordEvent({
+      entityType: 'program', entityId: programId, type: 'updated', actor,
+      // Back to "not measured", which is the honest state, not a failure.
+      summary: 'Ratio rule removed, so this program reports as not measured again',
+      before, after: null,
+    });
+  });
+  return true;
+}
+
+/** Programs with their ratio, so the set-up screen can show what is missing. */
+export function programsWithRatios(): Record<string, unknown>[] {
+  return plainAll(many<Record<string, unknown>>(
+    `SELECT p.id, p.name, r.children_per_staff, r.source
+       FROM programs p LEFT JOIN ratio_rules r ON r.program_id = p.id
+      WHERE p.active = 1 ORDER BY p.sort_order, p.name`));
+}
+
+/**
+ * People who could be put in a room.
+ *
+ * Name and role only, and no email: assigning an educator to a room does not
+ * require knowing how to contact them, and this list is shown to anyone who can
+ * edit rooms rather than only to whoever manages accounts. Narrow on purpose.
+ *
+ * Accounting and readonly are excluded because putting them in a room would
+ * hand them a register they have no business marking.
+ */
+export function assignableStaff(): Record<string, unknown>[] {
+  return plainAll(many<Record<string, unknown>>(
+    `SELECT id, name, role FROM users
+      WHERE status = 'active' AND role IN ('owner','director','admissions','educator')
+      ORDER BY name`));
+}
+
+/** Who is currently in each room, keyed by room, for the set-up screen. */
+export function staffByClassroom(): Record<string, Record<string, unknown>[]> {
+  const rows = plainAll(many<Record<string, unknown>>(
+    `SELECT s.classroom_id, s.user_id, s.role, u.name
+       FROM classroom_staff s JOIN users u ON u.id = s.user_id
+      WHERE u.status = 'active'
+      ORDER BY u.name`));
+  const out: Record<string, Record<string, unknown>[]> = {};
+  for (const r of rows) {
+    const key = String(r.classroom_id);
+    (out[key] ??= []).push({ user_id: r.user_id, name: r.name, role: r.role });
+  }
+  return out;
+}

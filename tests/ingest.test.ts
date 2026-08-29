@@ -43,7 +43,8 @@ const { seedAutomations, listAutomations, runAutomation, runsFor, disableAll } =
 const { factsForFamily, ruleSummary, summariseFamily, dailyBrief, aiStatus } =
   await import('../packages/server/src/core/ai.ts');
 const { visibleClassroomIds, register, mark, checkOut, assignStaff, unassignStaff,
-        roomStandings } = await import('../packages/server/src/core/attendance.ts');
+        roomStandings, createClassroom, updateClassroom, assignChild, unplacedChildren,
+        setRatio, clearRatio, assignableStaff } = await import('../packages/server/src/core/attendance.ts');
 const { timelineFor } = await import('../packages/server/src/core/events.ts');
 const { registerTransport, upsertTarget, targetFor, queue, due, suppressed, runChannel,
         recentRuns: syncRuns, channelStatus, backoffMs, MAX_ATTEMPTS, mappingFor, toRow,
@@ -1867,5 +1868,142 @@ describe('removing a logbook entry', () => {
     assert.throws(() => logRemove(entryId, actor), /already removed/);
     assert.throws(() => logRemove(randomUUID(), actor), /No such logbook entry/);
     logRestore(entryId, actor); // leave the book as we found it
+  });
+});
+
+
+/**
+ * The register shipped correct and unusable: nothing created a room, placed a
+ * child in one, or set a ratio, so the screen could only ever be empty. This
+ * walks the whole journey a director actually has to make, because that is the
+ * thing that was never checked.
+ */
+describe('getting the register working from nothing', () => {
+  const DAY = '2026-08-30';
+  let director: Awaited<ReturnType<typeof createUser>>;
+  let teacher: Awaited<ReturnType<typeof createUser>>;
+  let programId: string;
+  let roomId: string;
+  let childId: string;
+
+  const actor = (u: { id: string }) => ({ type: 'user' as const, id: u.id, source: 'manual' });
+
+  before(async () => {
+    const { one: dbOne, run: dbRun } = await import('../packages/server/src/db/index.ts');
+    const now = new Date().toISOString();
+    director = createUser('setup-dir@test.local', 'Wanjiru Halvorsen', 'director', 'test-pw-1234');
+    teacher = createUser('setup-edu@test.local', 'Emeka Lindgren', 'educator', 'test-pw-1234');
+
+    programId = randomUUID();
+    dbRun(`INSERT INTO programs (id, slug, name, active, sort_order, created_at)
+           VALUES (?,?,?,1,50,?)`, programId, `setup-${programId.slice(0, 8)}`, 'Setup Program', now);
+
+    const fam = randomUUID();
+    dbRun('INSERT INTO families (id, name, status, source, created_at, updated_at) VALUES (?,?,?,?,?,?)',
+      fam, 'Bhattacharya-Lund family', 'enrolled', 'manual', now, now);
+    childId = randomUUID();
+    dbRun(`INSERT INTO children (id, family_id, first_name, age_band, status, created_at, updated_at)
+           VALUES (?,?,?,?,'prospective',?,?)`, childId, fam, 'Ravi', '3-5 years', now, now);
+    assert.ok(dbOne('SELECT id FROM children WHERE id = ?', childId));
+  });
+
+  test('a child with no room shows up on the list of who still needs one', () => {
+    const waiting = unplacedChildren();
+    assert.ok(waiting.some((c) => c.id === childId),
+      'otherwise nobody knows there is anything to do');
+  });
+
+  test('a room needs a name, and a sensible capacity', () => {
+    assert.throws(() => createClassroom('   ', {}, actor(director)), /needs a name/);
+    assert.throws(() => createClassroom('Willow', { capacity: 0 }, actor(director)), /whole number/);
+    assert.throws(() => createClassroom('Willow', { capacity: 2.5 }, actor(director)), /whole number/);
+  });
+
+  test('creating a room records it, and the log says so', () => {
+    const room = createClassroom('Willow Room', { programId, capacity: 12 }, actor(director));
+    roomId = String(room.id);
+    assert.equal(room.name, 'Willow Room');
+    assert.equal(room.capacity, 12);
+    assert.ok(timelineFor('classroom', roomId, 5).some((e) => e.type === 'created'));
+  });
+
+  test('placing a child sets the room and the enrolment together', () => {
+    // Separately would be a trap: the register only lists enrolled children, so
+    // a child placed but not enrolled is invisible and looks like a failure.
+    const after = assignChild(childId, { classroomId: roomId, status: 'enrolled' }, actor(director));
+    assert.equal(after.classroom_id, roomId);
+    assert.equal(after.status, 'enrolled');
+    assert.equal(unplacedChildren().some((c) => c.id === childId), false, 'off the waiting list');
+  });
+
+  test('the register is no longer empty, which is the whole point', () => {
+    const rows = register(director, DAY);
+    assert.ok(rows.some((r) => r.child_id === childId),
+      'this is the assertion that would have caught shipping it unusable');
+  });
+
+  test('a closed room refuses new children rather than hiding them', () => {
+    const closed = createClassroom('Closed Room', {}, actor(director));
+    updateClassroom(String(closed.id), { active: false }, actor(director));
+    assert.throws(
+      () => assignChild(childId, { classroomId: String(closed.id) }, actor(director)),
+      /room is closed/);
+  });
+
+  test('a ratio must be one adult to a whole number of children', () => {
+    assert.throws(() => setRatio(programId, 0, null, actor(director)), /whole number/);
+    assert.throws(() => setRatio(programId, 4.5, null, actor(director)), /whole number/);
+    assert.throws(() => setRatio(randomUUID(), 4, null, actor(director)), /No such program/);
+  });
+
+  test('before a ratio exists the room says so; after, it is measured', () => {
+    const before = roomStandings(director, DAY).find((r) => r.classroomId === roomId);
+    assert.ok(before);
+    assert.equal(before.measured, false, 'no rule means not measured, never a green tick');
+
+    setRatio(programId, 8, 'Alberta child care regulation (illustrative)', actor(director));
+    assignStaff(roomId, teacher.id, 'lead', actor(director));
+
+    const after = roomStandings(director, DAY).find((r) => r.classroomId === roomId);
+    assert.ok(after);
+    assert.equal(after.measured, true);
+    assert.equal(after.requiredPerStaff, 8);
+    assert.equal(after.withinRatio, true, 'nobody checked in yet, so one educator is plenty');
+  });
+
+  test('removing the ratio returns the room to not measured', () => {
+    assert.equal(clearRatio(programId, actor(director)), true);
+    const after = roomStandings(director, DAY).find((r) => r.classroomId === roomId);
+    assert.equal(after?.measured, false);
+    assert.equal(after?.withinRatio, null, 'and no verdict is invented in its place');
+    assert.equal(clearRatio(programId, actor(director)), false, 'clearing twice is not an error');
+  });
+
+  test('the educator assigned to the room can now see the child, and still no birthday', () => {
+    const rows = register(teacher, DAY);
+    assert.deepEqual(rows.map((r) => r.child_id), [childId]);
+    assert.equal('date_of_birth' in rows[0]!, false,
+      'the set-up path must not have opened a hole in the permission rule');
+  });
+});
+
+describe('who can be put in a room', () => {
+  test('only people who would work with children, and only active ones', async () => {
+    const { run: dbRun } = await import('../packages/server/src/db/index.ts');
+    const money = createUser('bookkeeper@test.local', 'Nadia Fournier', 'accounting', 'test-pw-1234');
+    const viewer = createUser('viewer@test.local', 'Otto Reinholt', 'readonly', 'test-pw-1234');
+    const gone = createUser('left@test.local', 'Delphine Aubert', 'educator', 'test-pw-1234');
+    dbRun(`UPDATE users SET status = 'suspended' WHERE id = ?`, gone.id);
+
+    const list = assignableStaff();
+    const ids = list.map((p) => p.id);
+
+    assert.equal(ids.includes(money.id), false,
+      'putting accounting in a room would hand them a register to mark');
+    assert.equal(ids.includes(viewer.id), false);
+    assert.equal(ids.includes(gone.id), false, 'somebody suspended is not staff');
+    assert.ok(list.length > 0, 'and the people who should be there still are');
+    assert.equal(list.some((p) => 'email' in p), false,
+      'assigning a room does not require knowing how to contact them');
   });
 });
