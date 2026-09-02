@@ -11,13 +11,29 @@ outbound queue exists.
 | Integration | Status | Notes |
 |---|---|---|
 | Public website intake | **Live** | HMAC-signed events, idempotent, tested end to end |
-| Google Sheets | Not built (Phase 3) | Events already queue in `outbox` |
-| Excel / CSV | Not built (Phase 3) | |
-| Email | Not built (Phase 7) | |
+| Google Sheets | **Built, needs credentials** | Wired to the outbox. Reports "Google is not connected" and names the three variables, rather than warning about a backlog with nowhere to go |
+| Excel / CSV | **Built** | Import wizard: parse, preview, commit. Export is gated behind `data:export` |
+| Email | **Built, needs credentials** | Sending is queued and requires a signed-in person. Reports "Email is not connected" until `EMAIL_API_URL`, `EMAIL_API_KEY` and `EMAIL_FROM` are set |
 | Calendar | Not built (Phase 7) | |
 | Voice | Not started (Phase 10) | Contract reserved, see VOICE-FUTURE.md |
 
+"Needs credentials" means the code path is complete and tested against a local
+simulator; what is missing is an account, not an implementation. Neither one
+reports itself as healthy while unconfigured.
+
 `/system` in the app shows this same list. Nothing unbuilt is shown as green.
+
+## The public website is not one integration
+
+`tinystars.ca` is a Laravel site we do not control, and three of its five intake
+paths — tours, registration and the waitlist — redirect to Calendly, Zoho Forms
+and Lillio without ever reaching the site's own server. A webhook added to the
+website would capture the other two and miss the entire admissions pipeline.
+
+This is the single most important thing to understand before planning any
+website work. The audit, the per-provider plan and the exact operator action
+each one needs are in
+[TINYSTARS-WEBSITE-INTEGRATION.md](TINYSTARS-WEBSITE-INTEGRATION.md).
 
 ## The outbox
 

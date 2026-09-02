@@ -143,7 +143,7 @@ honest gap. The `/system` page lists this in the app too.
 | Area | Phase |
 |---|---|
 | Google Sheets **outbound is built but needs credentials**; inbound sync | 3 |
-| Local AI assistant, natural-language search, AI briefings | 4 |
+| Natural-language search. The AI layer itself — family summaries and the daily briefing — **is built**, and is off unless a provider is configured | 4 |
 | Documents, incidents, staff module | 6 |
 | Email **sending is built but needs credentials**; calendar, billing | 7 |
 | Team sync between devices | 9 |
@@ -225,7 +225,7 @@ headers. Expect small fixes on the first real `fly deploy`.
 ## Testing
 
 ```bash
-npm test          # 31 tests
+npm test          # 145 tests
 npm run typecheck
 ```
 
