@@ -5,18 +5,22 @@ import { Link, useRouter } from '../lib/router.tsx';
 import {
   Panel, Badge, Button, Empty, Spinner, ErrorNote, When, clockTime, isOverdue, toneForStatus, type Tone,
 } from '../ui/kit.tsx';
+import { AddFamily } from '../ui/AddFamily.tsx';
 
 /** Shared page frame: title, saved filters, and the list itself. (spec 288) */
 function ListPage(
-  { title, subtitle, filters, active, base, children }:
+  { title, subtitle, filters, active, base, children, action }:
   { title: string; subtitle?: string; filters: { id: string; label: string }[];
-    active: string; base: string; children: ReactNode },
+    active: string; base: string; children: ReactNode; action?: ReactNode },
 ) {
   return (
     <div className="flex flex-col gap-4">
-      <header>
-        <h1 className="text-xl font-semibold tracking-tight">{title}</h1>
-        {subtitle && <p className="mt-0.5 text-[13px]" style={{ color: 'var(--text-muted)' }}>{subtitle}</p>}
+      <header className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-xl font-semibold tracking-tight">{title}</h1>
+          {subtitle && <p className="mt-0.5 text-[13px]" style={{ color: 'var(--text-muted)' }}>{subtitle}</p>}
+        </div>
+        {action}
       </header>
       <nav className="-mx-1 flex gap-1 overflow-x-auto px-1 pb-1">
         {filters.map((f) => {
@@ -80,11 +84,13 @@ export function Families() {
   const { query } = useRouter();
   const filter = query.get('filter') ?? '';
   const res = useApi<{ families: FamilyRow[] }>(`/families${filter ? `?filter=${filter}` : ''}`);
+  const [adding, setAdding] = useState(false);
 
   return (
     <ListPage
       title="Families" base="/families" active={filter}
       subtitle="Every family the CRM knows about, newest activity first."
+      action={<Button variant="primary" onClick={() => setAdding(true)}>+ Add a family</Button>}
       filters={[
         { id: '', label: 'All' },
         { id: 'duplicates', label: 'Possible duplicates' },
@@ -92,9 +98,22 @@ export function Families() {
         { id: 'no-children', label: 'No child recorded' },
       ]}
     >
+      {adding && <AddFamily onClose={() => setAdding(false)} onCreated={res.reload} />}
       {res.loading && !res.data ? <Spinner /> : res.error ? <ErrorNote error={res.error} retry={res.reload} /> : (
         (res.data?.families.length ?? 0) === 0
-          ? <Panel><Empty title="No families match this filter" /></Panel>
+          ? (
+            <Panel>
+              <Empty
+                title={filter ? 'No families match this filter' : 'No families yet'}
+                hint={filter
+                  ? undefined
+                  : 'Add the first one by hand, or import a spreadsheet. Registrations from the website land here on their own.'}
+                action={filter ? undefined : (
+                  <Button variant="primary" onClick={() => setAdding(true)}>+ Add a family</Button>
+                )}
+              />
+            </Panel>
+          )
           : (
             <Table head={['Family', 'Status', 'Children', 'Primary contact', 'Latest activity', 'Updated']}>
               {res.data!.families.map((f) => (

@@ -10,11 +10,14 @@
  * is already safely stored. (spec 280)
  */
 import { one, run, tx } from '../db/index.ts';
-import { newId, nowIso, sha256, normEmail, normPhone, splitName, familyNameFrom } from '../core/util.ts';
+import { newId, nowIso, sha256, familyNameFrom } from '../core/util.ts';
 import { recordEvent, type Actor } from '../core/events.ts';
 import { queue as queueForSync } from '../core/sync.ts';
-import { findFamilyMatches, findChildInFamily, type FamilyMatch } from '../core/match.ts';
+import { findFamilyMatches, type FamilyMatch } from '../core/match.ts';
 import { indexEntity } from '../core/search.ts';
+// Families, guardians and children are written in exactly one place, so the
+// manual path and this one cannot drift apart. See core/people.ts.
+import { insertFamily, upsertGuardian, upsertChild, reindexFamily } from '../core/people.ts';
 import { notify, createTask } from '../core/notify.ts';
 import type {
   EventEnvelope, RegistrationData, TourRequestData, ContactData, GuardianInput, ChildInput, AnalyticsBatch,
@@ -50,80 +53,6 @@ function previousResult(eventId: string): IngestResult | AnalyticsResult | null 
 }
 
 // ------------------------------------------------------------------- writers
-
-function insertFamily(name: string, source: string, sourceId: string | null, actor: Actor): string {
-  const id = newId();
-  const now = nowIso();
-  run(
-    `INSERT INTO families (id, name, status, source, source_id, created_at, updated_at, created_by, updated_by)
-     VALUES (?,?,'prospective',?,?,?,?,?,?)`,
-    id, name, source, sourceId, now, now, actor.id, actor.id,
-  );
-  return id;
-}
-
-function upsertGuardian(familyId: string, g: GuardianInput, isPrimary: boolean): string {
-  const email = normEmail(g.email);
-  const phone = normPhone(g.phone);
-  const { first, last } = splitName(g.fullName);
-
-  // Same contact point inside this family = same person, update rather than add.
-  const existing = (email || phone)
-    ? one<{ id: string; email: string | null; phone: string | null }>(
-        `SELECT id, email, phone FROM guardians
-          WHERE family_id = ? AND ((email_norm IS NOT NULL AND email_norm = ?) OR (phone_norm IS NOT NULL AND phone_norm = ?))
-          LIMIT 1`,
-        familyId, email, phone)
-    : undefined;
-
-  const now = nowIso();
-  if (existing) {
-    // Only fill gaps. An inbound form must never blank a detail staff added.
-    run(
-      `UPDATE guardians SET
-         email = COALESCE(?, email), phone = COALESCE(?, phone),
-         email_norm = COALESCE(?, email_norm), phone_norm = COALESCE(?, phone_norm),
-         relationship = COALESCE(relationship, ?), contact_pref = COALESCE(contact_pref, ?),
-         updated_at = ?
-       WHERE id = ?`,
-      g.email ?? null, g.phone ?? null, email, phone,
-      g.relationship ?? null, g.preferredContact ?? null, now, existing.id,
-    );
-    return existing.id;
-  }
-
-  const id = newId();
-  run(
-    `INSERT INTO guardians (id, family_id, first_name, last_name, relationship, email, phone,
-       email_norm, phone_norm, is_primary, contact_pref, created_at, updated_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-    id, familyId, first, last, g.relationship ?? null, g.email ?? null, g.phone ?? null,
-    email, phone, isPrimary ? 1 : 0, g.preferredContact ?? null, now, now,
-  );
-  return id;
-}
-
-function upsertChild(familyId: string, c: ChildInput): string {
-  const found = findChildInFamily(familyId, c);
-  const now = nowIso();
-  if (found) {
-    run(
-      `UPDATE children SET
-         last_name = COALESCE(last_name, ?), date_of_birth = COALESCE(date_of_birth, ?),
-         age_band = COALESCE(age_band, ?), updated_at = ?
-       WHERE id = ?`,
-      c.lastName ?? null, c.dateOfBirth ?? null, c.ageBand ?? null, now, found.id,
-    );
-    return found.id;
-  }
-  const id = newId();
-  run(
-    `INSERT INTO children (id, family_id, first_name, last_name, date_of_birth, age_band, status, created_at, updated_at)
-     VALUES (?,?,?,?,?,?,'prospective',?,?)`,
-    id, familyId, c.firstName, c.lastName ?? null, c.dateOfBirth ?? null, c.ageBand ?? null, now, now,
-  );
-  return id;
-}
 
 function defaultStage(id: string): string {
   const row = one<{ id: string }>('SELECT id FROM lead_stages WHERE id = ?', id);
@@ -171,20 +100,6 @@ function upsertLead(
   return id;
 }
 
-function reindexFamily(familyId: string): void {
-  const f = one<{ id: string; name: string; status: string; source: string }>(
-    'SELECT id, name, status, source FROM families WHERE id = ?', familyId);
-  if (!f) return;
-  const guardianBlob = one<{ blob: string | null }>(
-    `SELECT group_concat(COALESCE(first_name,'') || ' ' || COALESCE(last_name,'') || ' ' ||
-            COALESCE(email,'') || ' ' || COALESCE(phone,''), ' ') AS blob
-       FROM guardians WHERE family_id = ?`, familyId)?.blob;
-  const childBlob = one<{ blob: string | null }>(
-    `SELECT group_concat(COALESCE(first_name,'') || ' ' || COALESCE(last_name,''), ' ') AS blob
-       FROM children WHERE family_id = ?`, familyId)?.blob;
-  const body = [f.status, f.source, guardianBlob, childBlob].filter(Boolean).join(' ');
-  indexEntity('family', f.id, f.name, body, f.id);
-}
 
 /** Queue an outbound sync. Never called inside the CRM write transaction's
  *  success path in a way that could fail it. */

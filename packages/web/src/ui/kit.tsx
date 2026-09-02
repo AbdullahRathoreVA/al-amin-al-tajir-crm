@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import { useEffect, useRef, type ReactNode } from 'react';
 
 // ------------------------------------------------------------------- layout
 
@@ -177,3 +177,171 @@ export function clockTime(iso: string | null): string {
 
 export const isOverdue = (iso: string | null | undefined): boolean =>
   !!iso && new Date(iso).getTime() < Date.now();
+
+// -------------------------------------------------------------------- forms
+//
+// These exist so that every form in the CRM gets a real <label> tied to its
+// input, a visible required marker, and errors attached with aria-describedby
+// rather than only coloured red. Written once here because a form assembled by
+// hand each time is a form where half of that quietly goes missing.
+
+let autoId = 0;
+const nextId = () => `f${++autoId}`;
+
+export function Field(
+  { label, hint, error, required, children, id }:
+  { label: string; hint?: string; error?: string | null; required?: boolean;
+    children: (props: { id: string; 'aria-describedby'?: string; 'aria-invalid'?: boolean; required?: boolean }) => ReactNode;
+    id?: string },
+) {
+  const fieldId = id ?? nextId();
+  const hintId = hint ? `${fieldId}-hint` : undefined;
+  const errId = error ? `${fieldId}-err` : undefined;
+  const describedBy = [errId, hintId].filter(Boolean).join(' ') || undefined;
+
+  return (
+    <div className="flex flex-col gap-1">
+      <label htmlFor={fieldId} className="text-[12px] font-medium">
+        {label}
+        {required && <span aria-hidden className="ml-0.5" style={{ color: 'var(--color-crit-400)' }}>*</span>}
+        {required && <span className="sr-only"> (required)</span>}
+      </label>
+      {children({
+        id: fieldId,
+        ...(describedBy ? { 'aria-describedby': describedBy } : {}),
+        ...(error ? { 'aria-invalid': true } : {}),
+        ...(required ? { required: true } : {}),
+      })}
+      {error && (
+        <p id={errId} className="text-[11px]" style={{ color: 'var(--color-crit-400)' }}>{error}</p>
+      )}
+      {hint && !error && (
+        <p id={hintId} className="text-[11px]" style={{ color: 'var(--text-faint)' }}>{hint}</p>
+      )}
+    </div>
+  );
+}
+
+export const inputClass =
+  'w-full rounded-lg border px-3 py-2.5 text-sm outline-none min-h-11 focus-visible:ring-2';
+export const inputStyle = {
+  borderColor: 'var(--line-strong)',
+  background: 'var(--surface-sunken)',
+  color: 'var(--text)',
+} as const;
+
+export function TextInput(props: React.InputHTMLAttributes<HTMLInputElement>) {
+  return <input {...props} className={`${inputClass} ${props.className ?? ''}`} style={{ ...inputStyle, ...props.style }} />;
+}
+
+export function SelectInput(
+  { children, ...rest }: React.SelectHTMLAttributes<HTMLSelectElement> & { children: ReactNode },
+) {
+  return (
+    <select {...rest} className={`${inputClass} ${rest.className ?? ''}`} style={{ ...inputStyle, ...rest.style }}>
+      {children}
+    </select>
+  );
+}
+
+export function TextArea(props: React.TextareaHTMLAttributes<HTMLTextAreaElement>) {
+  return <textarea {...props} className={`${inputClass} ${props.className ?? ''}`} style={{ ...inputStyle, ...props.style }} />;
+}
+
+// ------------------------------------------------------------------- dialog
+
+const FOCUSABLE =
+  'a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),' +
+  'textarea:not([disabled]),[tabindex]:not([tabindex="-1"])';
+
+/**
+ * A dialog that behaves like one.
+ *
+ * Keyboard users are the reason this is not just a div with a shadow. Tab is
+ * trapped inside while it is open, Escape closes it, focus moves to the first
+ * field on open and returns to whatever opened it on close — otherwise closing
+ * a dialog drops the caret back at the top of the document and a keyboard user
+ * has to travel the whole page again.
+ *
+ * Scrolling the page behind a modal is disabled for the same reason it is
+ * disabled everywhere else: on a phone the background scrolls instead of the
+ * dialog and the buttons walk off the screen.
+ */
+export function Modal(
+  { title, description, onClose, children, footer, wide }:
+  { title: string; description?: string; onClose: () => void; children: ReactNode;
+    footer?: ReactNode; wide?: boolean },
+) {
+  const panelRef = useRef<HTMLDivElement>(null);
+  const restoreTo = useRef<HTMLElement | null>(null);
+  const titleId = useRef(nextId()).current;
+  const descId = `${titleId}-desc`;
+
+  useEffect(() => {
+    restoreTo.current = document.activeElement as HTMLElement | null;
+    const first = panelRef.current?.querySelector<HTMLElement>(FOCUSABLE);
+    (first ?? panelRef.current)?.focus();
+
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') { e.stopPropagation(); onClose(); return; }
+      if (e.key !== 'Tab') return;
+      const items = Array.from(panelRef.current?.querySelectorAll<HTMLElement>(FOCUSABLE) ?? [])
+        .filter((el) => el.offsetParent !== null);
+      if (!items.length) return;
+      const first2 = items[0]!;
+      const last = items[items.length - 1]!;
+      if (e.shiftKey && document.activeElement === first2) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first2.focus(); }
+    };
+
+    // Capture, so Escape closes this dialog rather than something underneath it.
+    document.addEventListener('keydown', onKey, true);
+    return () => {
+      document.removeEventListener('keydown', onKey, true);
+      document.body.style.overflow = prevOverflow;
+      restoreTo.current?.focus?.();
+    };
+  }, [onClose]);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/50 p-4 py-[6vh]"
+         onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        {...(description ? { 'aria-describedby': descId } : {})}
+        tabIndex={-1}
+        className={`panel w-full ${wide ? 'max-w-2xl' : 'max-w-lg'} shadow-2xl outline-none`}
+      >
+        <header className="flex items-start justify-between gap-3 border-b px-5 py-4"
+                style={{ borderColor: 'var(--line)' }}>
+          <div>
+            <h2 id={titleId} className="text-sm font-semibold">{title}</h2>
+            {description && (
+              <p id={descId} className="mt-0.5 text-[12px]" style={{ color: 'var(--text-muted)' }}>
+                {description}
+              </p>
+            )}
+          </div>
+          <button onClick={onClose} aria-label="Close" type="button"
+                  className="-mr-1 -mt-1 grid size-9 shrink-0 place-items-center rounded-lg text-lg"
+                  style={{ color: 'var(--text-faint)' }}>&times;</button>
+        </header>
+
+        <div className="px-5 py-4">{children}</div>
+
+        {footer && (
+          <footer className="flex flex-wrap items-center justify-end gap-2 border-t px-5 py-3"
+                  style={{ borderColor: 'var(--line)' }}>
+            {footer}
+          </footer>
+        )}
+      </div>
+    </div>
+  );
+}

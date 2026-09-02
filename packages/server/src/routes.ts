@@ -6,7 +6,12 @@ import { Router, badRequest, notFound, gone, forbidden, verifySignature, HttpErr
 import { checkLoginAllowed, recordLoginFailure, recordLoginSuccess } from './core/ratelimit.ts';
 import { one, many, run, tx } from './db/index.ts';
 import { config } from './core/config.ts';
-import { newId, nowIso, plain, plainAll, safeJson } from './core/util.ts';
+import { newId, nowIso, plain, plainAll, safeJson, familyNameFrom } from './core/util.ts';
+import { findFamilyMatches } from './core/match.ts';
+import {
+  insertFamily, upsertGuardian, addChild, addGuardian, updateChild, updateGuardian,
+  reindexFamily, type ChildPatch, type GuardianPatch,
+} from './core/people.ts';
 import { login, logout, capabilitiesFor, canSeeSensitive, can, sessionsFor, revokeSession } from './core/auth.ts';
 import { recordEvent, familyTimeline, timelineFor, changesSince, diff, logAccess, historyOf, type Actor } from './core/events.ts';
 import { search as fullTextSearch, indexEntity, familyForRelated, type Indexable } from './core/search.ts';
@@ -15,12 +20,12 @@ import {
   todaySummary, attention, pipeline, programHealth, dataHealth, systemHealth,
   toursToday, overdueFollowUps,
 } from './core/queries.ts';
-import { validateEnvelope } from '../../shared/src/contract.ts';
+import { validateEnvelope, validateGuardianInput, validateChildInput } from '../../shared/src/contract.ts';
 import { analyticsBundle, isWindow, type Window } from './core/analytics.ts';
 import { assessRegistration, assessFamilyRegistration, incompleteRegistrations } from './core/completeness.ts';
 import { templates, composeDraft, suggestTemplate, saveDraft, draftsFor,
          requestSend, pendingDeliveries, SendRefused } from './core/drafts.ts';
-import { parseCsv, guessMapping, preview as previewImport, commitImport, IMPORT_FIELDS, FIELD_LABELS,
+import { parseTabular, guessMapping, preview as previewImport, commitImport, IMPORT_FIELDS, FIELD_LABELS,
   type ImportField } from './core/csv.ts';
 import { createBackup, listBackups, testRestore, pruneBackups } from './core/backup.ts';
 import { listAutomations, runAutomation, runScheduled, recentRuns, runsFor, disableAll,
@@ -233,6 +238,144 @@ router.get('/api/v1/families/:id', (c) => {
     timeline: familyTimeline(id, 100),
     sensitiveVisible: sensitive,
   };
+});
+
+// ------------------------------------------------- adding people by hand
+//
+// A daycare enrols children over the phone, at the door, and from a form a
+// parent filled in on paper. Until these existed the only ways into the CRM
+// were the public website and a spreadsheet import, which made the product
+// unusable for its actual job.
+//
+// These write through core/people.ts, the same helpers the website pipeline
+// uses, so a family typed in here and a family that arrived from a form are
+// the same shape of record.
+
+router.post('/api/v1/families', (c) => {
+  c.require('family:write');
+  const b = requireBody<{
+    familyName?: string;
+    guardians?: unknown[];
+    children?: unknown[];
+    notes?: string;
+    /** Set once the person has seen the possible duplicates and meant it. */
+    confirmDuplicate?: boolean;
+  }>(c);
+
+  const rawGuardians = Array.isArray(b.guardians) ? b.guardians : [];
+  if (!rawGuardians.length) throw badRequest('A family needs at least one guardian');
+
+  // The same validators the website's events go through, so a typed-in record
+  // cannot be looser than one a parent submitted.
+  const guardians = rawGuardians.map((g, i) => {
+    const v = validateGuardianInput(g);
+    if (!v.ok) {
+      throw new HttpError(400, `Guardian ${i + 1}: ${v.errors[0]!.message}`, { errors: v.errors });
+    }
+    return v.value;
+  });
+  const children = (Array.isArray(b.children) ? b.children : []).map((ch, i) => {
+    const v = validateChildInput(ch);
+    if (!v.ok) {
+      throw new HttpError(400, `Child ${i + 1}: ${v.errors[0]!.message}`, { errors: v.errors });
+    }
+    return v.value;
+  });
+
+  // Look before creating, and say so, rather than making a duplicate and
+  // raising a task about it afterwards. The person is right here.
+  const candidates = findFamilyMatches(guardians[0]!)
+    .filter((m) => m.decision === 'link' || m.decision === 'review');
+  if (candidates.length && !b.confirmDuplicate) {
+    throw new HttpError(409,
+      `This looks like an existing family: ${candidates[0]!.familyName}`,
+      { duplicates: candidates });
+  }
+
+  const actor = actorOf(c);
+  const name = (typeof b.familyName === 'string' && b.familyName.trim())
+    ? b.familyName.trim().slice(0, 120)
+    : familyNameFrom(guardians[0]!.fullName);
+
+  let familyId = '';
+  const guardianIds: string[] = [];
+  const childIds: string[] = [];
+
+  tx(() => {
+    familyId = insertFamily(name, 'manual', null, actor);
+    recordEvent({
+      entityType: 'family', entityId: familyId, type: 'created', actor,
+      summary: `${name} added by ${c.user!.name}`,
+      after: { name, source: 'manual', guardians: guardians.length, children: children.length },
+    });
+    guardians.forEach((g, i) => { guardianIds.push(upsertGuardian(familyId, g, i === 0)); });
+    for (const ch of children) childIds.push(addChild(familyId, ch, actor));
+
+    if (typeof b.notes === 'string' && b.notes.trim()) {
+      const noteId = newId();
+      run('INSERT INTO notes (id, entity_type, entity_id, body, author_id, created_at) VALUES (?,?,?,?,?,?)',
+        noteId, 'family', familyId, b.notes.trim().slice(0, 4000), c.user!.id, nowIso());
+      indexEntity('note', noteId, 'Note on family', b.notes.trim().slice(0, 4000), familyId);
+    }
+    reindexFamily(familyId);
+  });
+
+  return { familyId, guardianIds, childIds, duplicatesAcknowledged: candidates.length || undefined };
+});
+
+router.post('/api/v1/families/:id/children', (c) => {
+  c.require('child:write');
+  const familyId = c.params.id!;
+  if (!one('SELECT id FROM families WHERE id = ?', familyId)) {
+    throw missing('family', familyId, 'No such family');
+  }
+  const v = validateChildInput(requireBody(c));
+  if (!v.ok) throw new HttpError(400, v.errors[0]!.message, { errors: v.errors });
+
+  let childId = '';
+  tx(() => { childId = addChild(familyId, v.value, actorOf(c)); });
+  return plain(one(`SELECT * FROM children WHERE id = ?`, childId));
+});
+
+router.post('/api/v1/families/:id/guardians', (c) => {
+  c.require('family:write');
+  const familyId = c.params.id!;
+  if (!one('SELECT id FROM families WHERE id = ?', familyId)) {
+    throw missing('family', familyId, 'No such family');
+  }
+  const v = validateGuardianInput(requireBody(c));
+  if (!v.ok) throw new HttpError(400, v.errors[0]!.message, { errors: v.errors });
+
+  let guardianId = '';
+  tx(() => { guardianId = addGuardian(familyId, v.value, actorOf(c)); });
+  return plain(one('SELECT * FROM guardians WHERE id = ?', guardianId));
+});
+
+router.patch('/api/v1/children/:id', (c) => {
+  c.require('child:write');
+  const id = c.params.id!;
+  if (!one('SELECT id FROM children WHERE id = ?', id)) {
+    throw missing('child', id, 'No such child');
+  }
+  const b = requireBody<Record<string, unknown>>(c) as ChildPatch;
+  // A date of birth is sensitive, so writing one needs the capability to see
+  // one. Otherwise a role that cannot read a birthday could still set it.
+  if (b.dateOfBirth !== undefined && !canSeeSensitive(c.user)) {
+    throw forbidden('Your role cannot set a date of birth');
+  }
+  tx(() => { updateChild(id, b, actorOf(c)); });
+  return plain(one('SELECT * FROM children WHERE id = ?', id));
+});
+
+router.patch('/api/v1/guardians/:id', (c) => {
+  c.require('family:write');
+  const id = c.params.id!;
+  if (!one('SELECT id FROM guardians WHERE id = ?', id)) {
+    throw missing('guardian', id, 'No such guardian');
+  }
+  const patch = requireBody<Record<string, unknown>>(c) as GuardianPatch;
+  tx(() => { updateGuardian(id, patch, actorOf(c)); });
+  return plain(one('SELECT * FROM guardians WHERE id = ?', id));
 });
 
 router.patch('/api/v1/families/:id', (c) => {
@@ -681,19 +824,44 @@ router.post('/api/v1/families/:id/draft', (c) => {
  * Three steps on purpose: parse, then preview, then commit. Nothing is written
  * until a person has seen the counts and the sample rows. (spec 45 / 47)
  */
+/** Body shared by all three import steps. Each re-parses rather than holding
+ *  server-side state, so an abandoned import leaves nothing behind. */
+interface ImportBody extends Record<string, unknown> {
+  csv?: string;
+  /** An .xlsx as base64. Read directly — no "save as CSV" step. */
+  xlsxBase64?: string;
+  /** Which tab. Defaults to the first. */
+  sheet?: string;
+  mapping?: Record<string, number>;
+  source?: string;
+}
+
+/** 5 MB of CSV, or an .xlsx whose base64 is under ~6.7 MB (base64 is 4/3). */
+function parseUpload(b: ImportBody) {
+  const size = (b.csv?.length ?? 0) + (b.xlsxBase64?.length ?? 0);
+  if (size > 6_800_000) throw badRequest('That file is larger than 5 MB.');
+  try {
+    return parseTabular(b);
+  } catch (err) {
+    // A bad spreadsheet is the operator's problem to fix, so the message has
+    // to say what to do rather than name an exception.
+    throw badRequest(err instanceof Error ? err.message : 'That file could not be read.');
+  }
+}
+
 router.post('/api/v1/import/parse', (c) => {
   c.require('family:write');
-  const b = requireBody<{ csv?: string }>(c);
-  if (typeof b.csv !== 'string' || !b.csv.trim()) throw badRequest('Send the file contents as { csv: "..." }');
-  if (b.csv.length > 5_000_000) throw badRequest('That file is larger than 5 MB.');
-
-  const parsed = parseCsv(b.csv);
-  if (!parsed.headers.length) throw badRequest('No header row found. The first line must name the columns.');
+  const b = requireBody<ImportBody>(c);
+  const parsed = parseUpload(b);
+  if (!parsed.headers.length) throw badRequest('No header row found. The first row must name the columns.');
 
   return {
     headers: parsed.headers,
     rowCount: parsed.rows.length,
     truncated: parsed.truncated,
+    // Present only for a workbook, so the UI can offer the other tabs.
+    sheetNames: parsed.sheetNames,
+    sheet: parsed.sheet,
     mapping: guessMapping(parsed.headers),
     fields: IMPORT_FIELDS.map((f) => ({ id: f, label: FIELD_LABELS[f] })),
     // A few raw rows so a person can see the mapping is pointing at the right
@@ -704,17 +872,14 @@ router.post('/api/v1/import/parse', (c) => {
 
 router.post('/api/v1/import/preview', (c) => {
   c.require('family:write');
-  const b = requireBody<{ csv?: string; mapping?: Record<string, number> }>(c);
-  if (typeof b.csv !== 'string') throw badRequest('csv is required');
-  const parsed = parseCsv(b.csv);
-  return previewImport(parsed, (b.mapping ?? {}) as Partial<Record<ImportField, number>>);
+  const b = requireBody<ImportBody>(c);
+  return previewImport(parseUpload(b), (b.mapping ?? {}) as Partial<Record<ImportField, number>>);
 });
 
 router.post('/api/v1/import/commit', (c) => {
   c.require('family:write');
-  const b = requireBody<{ csv?: string; mapping?: Record<string, number>; source?: string }>(c);
-  if (typeof b.csv !== 'string') throw badRequest('csv is required');
-  const parsed = parseCsv(b.csv);
+  const b = requireBody<ImportBody>(c);
+  const parsed = parseUpload(b);
   const result = commitImport(
     parsed,
     (b.mapping ?? {}) as Partial<Record<ImportField, number>>,

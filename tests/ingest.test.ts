@@ -37,6 +37,13 @@ const { seedTemplates, composeDraft, suggestTemplate, saveDraft } =
 const { parseCsv, guessMapping, preview: previewImport, commitImport } =
   await import('../packages/server/src/core/csv.ts');
 const { splitName } = await import('../packages/server/src/core/util.ts');
+const { buildWorkbook } = await import('../packages/server/src/core/xlsx.ts');
+const { readXlsx, readSheet, looksLikeXlsx, fromExcelSerial } =
+  await import('../packages/server/src/core/xlsx-read.ts');
+const { parseTabular } = await import('../packages/server/src/core/csv.ts');
+const { addChild, addGuardian, updateChild, updateGuardian, insertFamily,
+        ageBandFor, ageLabel, monthsBetween } =
+  await import('../packages/server/src/core/people.ts');
 const { createBackup, listBackups, testRestore, pruneBackups } =
   await import('../packages/server/src/core/backup.ts');
 const { seedAutomations, listAutomations, runAutomation, runsFor, disableAll } =
@@ -2054,5 +2061,242 @@ describe('who can be put in a room', () => {
     assert.ok(list.length > 0, 'and the people who should be there still are');
     assert.equal(list.some((p) => 'email' in p), false,
       'assigning a room does not require knowing how to contact them');
+  });
+});
+
+// ------------------------------------------------------------ manual entry
+//
+// The CRM could only ever be filled from the public website or a spreadsheet.
+// A daycare enrols children over the phone and at the door, so these cover the
+// path a person actually uses.
+
+describe('adding a family by hand', () => {
+  const STAFF = { type: 'user' as const, id: null, source: 'manual' };
+
+  test('a child added by hand is searchable, and opens their family', () => {
+    const familyId = insertFamily('Sandoval family', 'manual', null, STAFF);
+    const childId = addChild(familyId, { firstName: 'Mateo', ageBand: '3-5 years' }, STAFF);
+
+    const row = one<{ family_id: string; first_name: string; status: string }>(
+      'SELECT family_id, first_name, status FROM children WHERE id = ?', childId);
+    assert.equal(row?.family_id, familyId);
+    assert.equal(row?.status, 'prospective');
+
+    const hit = search('Mateo').find((h) => h.entity_type === 'child');
+    assert.ok(hit, 'a hand-added child must be findable straight away');
+    assert.equal(hit.family_id, familyId, 'and must open the family, not a list');
+  });
+
+  test('the family row is reindexed too, so the surname finds it', () => {
+    const familyId = insertFamily('Bergstrom family', 'manual', null, STAFF);
+    addGuardian(familyId, { fullName: 'Annika Bergstrom', email: 'annika@example.invalid' }, STAFF);
+    assert.ok(search('Bergstrom').some((h) => h.entity_id === familyId));
+  });
+
+  test('every hand-made record lands in the append-only log', () => {
+    const familyId = insertFamily('Okafor family', 'manual', null, STAFF);
+    const childId = addChild(familyId, { firstName: 'Zuri' }, STAFF);
+    const events = many<{ type: string; summary: string }>(
+      "SELECT type, summary FROM events WHERE entity_id = ?", childId);
+    assert.equal(events.length, 1);
+    assert.equal(events[0]!.type, 'created');
+    assert.match(events[0]!.summary, /Zuri/);
+  });
+
+  test('a person may correct a value the website may only fill', () => {
+    // The inbound path COALESCEs so a re-submitted form cannot blank a detail
+    // staff fixed. A person typing is doing the fixing, so they overwrite.
+    const familyId = insertFamily('Haddad family', 'manual', null, STAFF);
+    const gid = addGuardian(familyId, { fullName: 'Rami Haddad', phone: '780-555-0111' }, STAFF);
+
+    updateGuardian(gid, { phone: '780-555-0999' }, STAFF);
+    const after = one<{ phone: string; phone_norm: string }>(
+      'SELECT phone, phone_norm FROM guardians WHERE id = ?', gid);
+    assert.equal(after?.phone, '780-555-0999');
+    // The normalised column has to move with it or dedupe silently rots.
+    assert.ok(after?.phone_norm?.includes('7805550999'));
+  });
+
+  test('promoting a guardian to primary demotes the previous one', () => {
+    const familyId = insertFamily('Iversen family', 'manual', null, STAFF);
+    const first = addGuardian(familyId, { fullName: 'Nora Iversen', email: 'nora@example.invalid' }, STAFF);
+    const second = addGuardian(familyId, { fullName: 'Jonas Iversen', email: 'jonas@example.invalid' }, STAFF);
+
+    updateGuardian(second, { isPrimary: true }, STAFF);
+    const primaries = many<{ id: string }>(
+      'SELECT id FROM guardians WHERE family_id = ? AND is_primary = 1', familyId);
+    assert.deepEqual(primaries.map((p) => p.id), [second]);
+    assert.notEqual(first, second);
+  });
+
+  test('editing the date of birth re-derives the age band', () => {
+    const familyId = insertFamily('Petrov family', 'manual', null, STAFF);
+    const childId = addChild(familyId, { firstName: 'Lena', ageBand: 'Under 12 months' }, STAFF);
+
+    const fourYearsAgo = new Date();
+    fourYearsAgo.setFullYear(fourYearsAgo.getFullYear() - 4);
+    updateChild(childId, { dateOfBirth: fourYearsAgo.toISOString().slice(0, 10) }, STAFF);
+
+    const after = one<{ age_band: string }>('SELECT age_band FROM children WHERE id = ?', childId);
+    assert.equal(after?.age_band, '3-5 years',
+      'a stale band next to a real birthday is how a child ends up in the wrong room');
+  });
+
+  test('an explicit band still wins over the derived one', () => {
+    const familyId = insertFamily('Nakagawa family', 'manual', null, STAFF);
+    const childId = addChild(familyId, { firstName: 'Haru' }, STAFF);
+    const twoYearsAgo = new Date();
+    twoYearsAgo.setFullYear(twoYearsAgo.getFullYear() - 2);
+
+    updateChild(childId, {
+      dateOfBirth: twoYearsAgo.toISOString().slice(0, 10),
+      ageBand: '3-5 years',
+    }, STAFF);
+    const after = one<{ age_band: string }>('SELECT age_band FROM children WHERE id = ?', childId);
+    assert.equal(after?.age_band, '3-5 years');
+  });
+});
+
+describe('working out an age band from a birthday', () => {
+  const on = (isoBirth: string, isoWhen: string) => ageBandFor(isoBirth, new Date(isoWhen));
+
+  test('the boundaries land on the right side', () => {
+    // A child is 11 months old until the day they are 12 months old.
+    assert.equal(on('2026-01-15', '2026-12-14'), 'Under 12 months');
+    assert.equal(on('2026-01-15', '2027-01-15'), '12-18 months');
+    assert.equal(on('2026-01-15', '2027-07-15'), '18 months - 3 years');
+    assert.equal(on('2026-01-15', '2029-01-15'), '3-5 years');
+    assert.equal(on('2026-01-15', '2031-01-15'), '5-6 years');
+    assert.equal(on('2026-01-15', '2032-01-15'), '6-12 years');
+  });
+
+  test('a child too old for any band is null, not squeezed into the last one', () => {
+    assert.equal(on('2026-01-15', '2040-01-15'), null);
+  });
+
+  test('nothing to go on, or a date in the future, is null rather than a guess', () => {
+    assert.equal(ageBandFor(null), null);
+    assert.equal(ageBandFor(undefined), null);
+    assert.equal(ageBandFor('not a date'), null);
+    assert.equal(on('2030-01-15', '2026-01-15'), null);
+  });
+
+  test('the age reads the way a person would say it', () => {
+    assert.equal(ageLabel('2026-01-15', new Date('2026-07-15')), '6 months');
+    assert.equal(ageLabel('2026-01-15', new Date('2027-01-15')), '12 months');
+    assert.equal(ageLabel('2026-01-15', new Date('2029-01-15')), '3 years');
+    assert.equal(ageLabel('2026-01-15', new Date('2027-02-15')), '13 months');
+    assert.equal(monthsBetween('2026-01-15', new Date('2026-01-14')), -1);
+  });
+});
+
+// ------------------------------------------------------------- reading xlsx
+//
+// A centre's roll of two or three hundred children lives in Excel, not in CSV.
+// "Save as CSV first" loses every tab but one and lets Excel reformat dates on
+// the way out, so the importer reads the .xlsx itself. These are the cases that
+// actually bite.
+
+describe('reading a real .xlsx', () => {
+  const book = (rows: Record<string, unknown>[], extra: unknown[] = []) => buildWorkbook([
+    {
+      name: 'Roll', accent: 'teal',
+      columns: [
+        { header: 'First name', key: 'first', format: 'text' },
+        { header: 'Last name', key: 'last', format: 'text' },
+        { header: 'Date of birth', key: 'dob', format: 'date' },
+        { header: 'Fee', key: 'fee', format: 'money' },
+      ],
+      rows: rows as never,
+    },
+    ...(extra as never[]),
+  ]);
+
+  test('a workbook written here reads back with its values intact', () => {
+    const buf = book([{ first: 'Chidi', last: 'Okonkwo', dob: '2022-03-14', fee: 425.5 }]);
+    const [sheet] = readXlsx(buf);
+    assert.equal(sheet!.name, 'Roll');
+    assert.deepEqual(sheet!.rows[0], ['First name', 'Last name', 'Date of birth', 'Fee']);
+    assert.deepEqual(sheet!.rows[1], ['Chidi', 'Okonkwo', '2022-03-14', '425.5']);
+  });
+
+  test('a date comes back as a date, not as the number Excel stores', () => {
+    // This is the one that matters. Excel keeps 2022-03-14 as 44634 and
+    // remembers it was a date only in the cell format; read naively, every
+    // birthday in the file imports as a five-digit number that validates fine.
+    const [sheet] = readXlsx(book([{ first: 'Aiko', dob: '2024-11-02' }]));
+    assert.equal(sheet!.rows[1]![2], '2024-11-02');
+  });
+
+  test('the epoch is right, including Excel’s imaginary 29 February 1900', () => {
+    assert.equal(fromExcelSerial(1), '1900-01-01');
+    assert.equal(fromExcelSerial(59), '1900-02-28');
+    // 60 is 29 Feb 1900, a day that never existed. 61 must still be 1 March.
+    assert.equal(fromExcelSerial(61), '1900-03-01');
+    assert.equal(fromExcelSerial(44634), '2022-03-14');
+    assert.equal(fromExcelSerial(0), null);
+    assert.equal(fromExcelSerial(-5), null);
+  });
+
+  test('escaped characters in a name survive the round trip', () => {
+    const [sheet] = readXlsx(book([{ first: "O'Brien & Sons", last: '<Ali> "The" One' }]));
+    assert.equal(sheet!.rows[1]![0], "O'Brien & Sons");
+    assert.equal(sheet!.rows[1]![1], '<Ali> "The" One');
+  });
+
+  test('every tab is read, in the order Excel shows them', () => {
+    const buf = book([{ first: 'Chidi' }], [
+      { name: 'Waitlist', accent: 'amber', columns: [{ header: 'Note', key: 'n', format: 'text' }],
+        rows: [{ n: 'second tab' }] },
+      { name: 'Staff', accent: 'rose', columns: [{ header: 'Who', key: 'w', format: 'text' }],
+        rows: [{ w: 'third tab' }] },
+    ]);
+    const sheets = readXlsx(buf);
+    assert.deepEqual(sheets.map((s) => s.name), ['Roll', 'Waitlist', 'Staff']);
+    assert.equal(sheets[1]!.rows[1]![0], 'second tab');
+  });
+
+  test('the import wizard sees an .xlsx exactly as it sees a CSV', () => {
+    const buf = book([
+      { first: 'Chidi', last: 'Okonkwo', dob: '2022-03-14' },
+      { first: 'Aiko', last: 'Nakamura', dob: '2024-11-02' },
+    ]);
+    const t = parseTabular({ xlsxBase64: buf.toString('base64') });
+    assert.deepEqual(t.headers, ['First name', 'Last name', 'Date of birth', 'Fee']);
+    assert.equal(t.rows.length, 2, 'the header row must not be counted as a record');
+    assert.deepEqual(t.sheetNames, ['Roll']);
+    assert.equal(t.sheet, 'Roll');
+  });
+
+  test('a named tab can be chosen, and an unknown name falls back to the first', () => {
+    const buf = book([{ first: 'Chidi' }], [
+      { name: 'Waitlist', accent: 'amber', columns: [{ header: 'Note', key: 'n', format: 'text' }],
+        rows: [{ n: 'on the list' }] },
+    ]);
+    const b64 = buf.toString('base64');
+    assert.equal(parseTabular({ xlsxBase64: b64, sheet: 'Waitlist' }).rows[0]![0], 'on the list');
+    assert.equal(parseTabular({ xlsxBase64: b64, sheet: 'Nope' }).sheet, 'Roll');
+  });
+
+  test('something that is not a spreadsheet is refused with advice, not a stack trace', () => {
+    assert.equal(looksLikeXlsx(Buffer.from('first,last\na,b')), false);
+    assert.throws(
+      () => parseTabular({ xlsxBase64: Buffer.from('not a zip at all').toString('base64') }),
+      /does not look like an \.xlsx/);
+    // An .xls (the old binary format) is a common and confusing case.
+    assert.throws(() => parseTabular({}), /Send a CSV/);
+  });
+
+  test('a formula is never evaluated; only its cached value is read', () => {
+    // Imported spreadsheets are untrusted. Running someone else's formula is
+    // how a spreadsheet turns into code execution.
+    const sheetXml = `<worksheet><sheetData><row r="1">
+      <c r="A1" t="str"><f>1+1</f><v>2</v></c>
+      <c r="B1"><f>HYPERLINK("http://x")</f></c>
+    </row></sheetData></worksheet>`;
+    assert.match(sheetXml, /<f>/);
+    // The reader only ever looks at <v>, so B1 (no cached value) is empty.
+    const rows = readSheet(sheetXml);
+    assert.deepEqual(rows[0], ['2', '']);
   });
 });

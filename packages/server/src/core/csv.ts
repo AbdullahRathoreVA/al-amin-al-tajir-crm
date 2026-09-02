@@ -17,12 +17,60 @@ import { recordEvent, type Actor } from './events.ts';
 import { findFamilyMatches } from './match.ts';
 import { indexEntity } from './search.ts';
 import { AGE_BANDS, isEmailish, isPhoneish } from '../../../shared/src/contract.ts';
+import { readXlsx, looksLikeXlsx } from './xlsx-read.ts';
 
 // ------------------------------------------------------------------ parsing
 
 export interface ParsedCsv { headers: string[]; rows: string[][]; truncated: boolean }
 
 const MAX_ROWS = 5000;
+
+/**
+ * One spreadsheet, whatever shape it arrived in.
+ *
+ * A centre's roll lives in Excel, not in CSV, and "Save as CSV first" is a
+ * step that loses every sheet but one and lets Excel reformat dates on the way
+ * out. So an .xlsx is read directly and flattened to the same rows a CSV
+ * produces — which means the mapping, validation, duplicate check and commit
+ * downstream do not know or care which it was.
+ *
+ * `sheet` picks a tab by name. Without it the first tab wins, because that is
+ * where a roll almost always is, and `sheetNames` comes back so a person can
+ * choose a different one.
+ */
+export interface Tabular extends ParsedCsv {
+  /** Every tab in the workbook, in Excel's own order. Absent for a CSV. */
+  sheetNames?: string[];
+  /** The tab these rows came from. */
+  sheet?: string;
+}
+
+export function parseTabular(
+  input: { csv?: string; xlsxBase64?: string; sheet?: string },
+): Tabular {
+  if (typeof input.xlsxBase64 === 'string' && input.xlsxBase64) {
+    const buf = Buffer.from(input.xlsxBase64, 'base64');
+    if (!looksLikeXlsx(buf)) {
+      throw new Error('That does not look like an .xlsx file. If it is an old .xls, open it in Excel and save it as .xlsx or CSV.');
+    }
+    const sheets = readXlsx(buf);
+    const chosen = (input.sheet && sheets.find((s) => s.name === input.sheet)) || sheets[0]!;
+    const [headers = [], ...rows] = chosen.rows;
+    return {
+      headers: headers.map((h) => h.trim()),
+      // A row that is entirely empty is Excel's formatting, not a record.
+      rows: rows.filter((r) => r.some((cell) => cell !== '')).slice(0, MAX_ROWS),
+      truncated: rows.length > MAX_ROWS,
+      sheetNames: sheets.map((s) => s.name),
+      sheet: chosen.name,
+    };
+  }
+
+  if (typeof input.csv !== 'string' || !input.csv.trim()) {
+    throw new Error('Send a CSV as { csv } or a spreadsheet as { xlsxBase64 }.');
+  }
+  return parseCsv(input.csv);
+}
 
 export function parseCsv(text: string): ParsedCsv {
   // Excel writes a UTF-8 BOM. Left in place it becomes part of the first header
@@ -143,7 +191,7 @@ export interface ImportPreview {
   willSkip: number;
   issues: RowIssue[];
   /** First few resolved rows, so a person can eyeball the mapping. */
-  sample: { row: number; guardian: string; child: string; email: string; action: string }[];
+  sample: { row: number; guardian: string; child: string; contact: string; action: string }[];
   truncated: boolean;
 }
 
@@ -301,7 +349,9 @@ export function preview(parsed: ParsedCsv, mapping: Partial<Record<ImportField, 
       row: r.rowNumber,
       guardian: r.guardianName || '(none)',
       child: r.childFirstName ?? '(none)',
-      email: r.guardianEmail ?? r.guardianPhone ?? '(none)',
+      // Named for what it is: whichever way we can reach them. `??` would
+      // keep an empty string and show a blank where a phone number exists.
+      contact: r.guardianEmail || r.guardianPhone || '(none)',
       action: r.action,
     })),
     truncated: parsed.truncated,

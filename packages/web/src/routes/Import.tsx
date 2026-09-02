@@ -7,23 +7,42 @@ interface FieldDef { id: string; label: string }
 interface ParseResult {
   headers: string[]; rowCount: number; truncated: boolean;
   mapping: Record<string, number>; fields: FieldDef[]; sampleRows: string[][];
+  /** Only for a workbook: every tab, and which one these rows came from. */
+  sheetNames?: string[]; sheet?: string;
 }
 interface Issue { row: number; field: string; message: string; severity: 'error' | 'warning' }
 interface Preview {
   totalRows: number; willCreate: number; willUpdate: number; willSkip: number;
   issues: Issue[];
-  sample: { row: number; guardian: string; child: string; email: string; action: string }[];
+  sample: { row: number; guardian: string; child: string; contact: string; action: string }[];
   truncated: boolean;
 }
 interface Result { batchId: string; created: number; updated: number; skipped: number; issues: Issue[] }
+
+/** Base64 without spreading a whole file into arguments, which blows the call
+ *  stack somewhere around a couple of hundred thousand rows. */
+function toBase64(bytes: Uint8Array): string {
+  let s = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    s += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(s);
+}
+
+/** What was uploaded, in whichever form the server needs to re-read it. */
+interface Upload { csv?: string; xlsxBase64?: string; sheet?: string }
 
 /**
  * Import in three steps, because a spreadsheet of real families is not
  * something to write on a single click: choose the file, check the columns,
  * then see exactly what will happen before it happens.
+ *
+ * An .xlsx is read as-is, tabs and all. A roll of two or three hundred
+ * children lives in Excel, and "save as CSV first" is a step that loses every
+ * other tab and lets Excel reformat the birthdays on the way out.
  */
 export function Import() {
-  const [csv, setCsv] = useState<string | null>(null);
+  const [upload, setUpload] = useState<Upload | null>(null);
   const [fileName, setFileName] = useState('');
   const [parsed, setParsed] = useState<ParseResult | null>(null);
   const [mapping, setMapping] = useState<Record<string, number>>({});
@@ -34,19 +53,17 @@ export function Import() {
   const fileRef = useRef<HTMLInputElement>(null);
 
   function reset() {
-    setCsv(null); setFileName(''); setParsed(null); setMapping({});
+    setUpload(null); setFileName(''); setParsed(null); setMapping({});
     setPreview(null); setResult(null); setError(null);
     if (fileRef.current) fileRef.current.value = '';
   }
 
-  async function onFile(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  async function parseUpload(next: Upload, name: string) {
     setBusy(true); setError(null); setPreview(null); setResult(null);
     try {
-      const text = await file.text();
-      setCsv(text); setFileName(file.name);
-      const p = await api.post<ParseResult>('/import/parse', { csv: text });
+      const p = await api.post<ParseResult>('/import/parse', next);
+      setUpload({ ...next, sheet: p.sheet ?? next.sheet });
+      setFileName(name);
       setParsed(p);
       setMapping(p.mapping);
     } catch (err) {
@@ -54,18 +71,39 @@ export function Import() {
     } finally { setBusy(false); }
   }
 
+  async function onFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    // An .xlsx is a ZIP, so it has to go over as bytes. A CSV is text, and
+    // sending it as text keeps the error messages about it readable.
+    const isXlsx = /\.xlsx$/i.test(file.name)
+      || file.type === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+    if (isXlsx) {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      await parseUpload({ xlsxBase64: toBase64(bytes) }, file.name);
+    } else {
+      await parseUpload({ csv: await file.text() }, file.name);
+    }
+  }
+
+  /** Re-reads the workbook against a different tab. */
+  async function chooseSheet(sheet: string) {
+    if (!upload?.xlsxBase64) return;
+    await parseUpload({ ...upload, sheet }, fileName);
+  }
+
   async function doPreview() {
-    if (!csv) return;
+    if (!upload) return;
     setBusy(true); setError(null);
-    try { setPreview(await api.post<Preview>('/import/preview', { csv, mapping })); }
+    try { setPreview(await api.post<Preview>('/import/preview', { ...upload, mapping })); }
     catch (err) { setError(err instanceof Error ? err.message : 'Could not check the file'); }
     finally { setBusy(false); }
   }
 
   async function doCommit() {
-    if (!csv) return;
+    if (!upload) return;
     setBusy(true); setError(null);
-    try { setResult(await api.post<Result>('/import/commit', { csv, mapping, source: fileName })); }
+    try { setResult(await api.post<Result>('/import/commit', { ...upload, mapping, source: fileName })); }
     catch (err) { setError(err instanceof Error ? err.message : 'The import failed'); }
     finally { setBusy(false); }
   }
@@ -102,19 +140,51 @@ export function Import() {
       {/* ------------------------------------------------------- step 1 */}
       <Panel title="1. Choose a file">
         <input
-          ref={fileRef} type="file" accept=".csv,text/csv" onChange={onFile}
+          ref={fileRef} type="file"
+          accept=".xlsx,.csv,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+          onChange={onFile}
           className="block w-full text-[13px] file:mr-3 file:min-h-10 file:cursor-pointer file:rounded-lg file:border-0 file:px-4 file:text-sm file:font-medium"
           style={{ color: 'var(--text-muted)' }}
         />
         <p className="mt-2 text-[11px]" style={{ color: 'var(--text-faint)' }}>
-          CSV. In Excel or Google Sheets: File &rarr; Download / Save As &rarr; CSV. Up to 5&nbsp;MB
-          and 5,000 rows.
+          An Excel <strong>.xlsx</strong> or a <strong>.csv</strong>. Excel files are read directly,
+          tabs and all &mdash; there is no need to save as CSV first. Up to 5&nbsp;MB and 5,000 rows.
+          An older <strong>.xls</strong> has to be re-saved as .xlsx.
         </p>
         {fileName && (
           <p className="mt-2 text-[13px]">
             <strong>{fileName}</strong>
             {parsed && <> &mdash; {parsed.rowCount} {parsed.rowCount === 1 ? 'row' : 'rows'}, {parsed.headers.length} columns</>}
           </p>
+        )}
+
+        {/* A roll is rarely the only tab in the workbook. */}
+        {parsed?.sheetNames && parsed.sheetNames.length > 1 && (
+          <div className="mt-3">
+            <p className="mb-1.5 text-[12px] font-medium">
+              This workbook has {parsed.sheetNames.length} tabs. Reading:
+            </p>
+            <div className="flex flex-wrap gap-1.5">
+              {parsed.sheetNames.map((name) => {
+                const on = name === parsed.sheet;
+                return (
+                  <button
+                    key={name}
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void chooseSheet(name)}
+                    aria-pressed={on}
+                    className="min-h-9 rounded-lg px-3 text-[13px] font-medium disabled:opacity-50"
+                    style={on
+                      ? { background: 'var(--accent)', color: 'var(--accent-text)' }
+                      : { background: 'var(--surface-inset)', color: 'var(--text-muted)' }}
+                  >
+                    {name}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
         )}
         {parsed?.truncated && (
           <p className="mt-2 text-[12px]" style={{ color: 'var(--color-warn-400)' }}>
@@ -218,7 +288,7 @@ export function Import() {
                       <td className="tabular px-2 py-1.5" style={{ color: 'var(--text-faint)' }}>{r.row}</td>
                       <td className="px-2 py-1.5">{r.guardian}</td>
                       <td className="px-2 py-1.5">{r.child}</td>
-                      <td className="max-w-[180px] truncate px-2 py-1.5" style={{ color: 'var(--text-muted)' }}>{r.email}</td>
+                      <td className="max-w-[180px] truncate px-2 py-1.5" style={{ color: 'var(--text-muted)' }}>{r.contact}</td>
                       <td className="px-2 py-1.5">
                         <Badge tone={r.action === 'create' ? 'ok' : r.action === 'update' ? 'info' : 'crit'}>
                           {r.action}

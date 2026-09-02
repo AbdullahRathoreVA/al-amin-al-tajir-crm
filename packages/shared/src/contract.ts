@@ -203,6 +203,27 @@ function child(v: unknown, base: string, errs: ValidationError[], required = tru
   return c;
 }
 
+/**
+ * The guardian and child validators on their own.
+ *
+ * Staff adding a family by hand go through exactly the same rules a parent's
+ * submission does — same name handling, same permissive email check, same
+ * "a lead with no way to reach it is not a lead". A second, looser validator
+ * for the internal path is how two definitions of a valid record start to
+ * disagree, and the CRM would be the one holding both.
+ */
+export function validateGuardianInput(raw: unknown): Validated<GuardianInput> {
+  const errs: ValidationError[] = [];
+  const value = guardian(raw, 'guardian', errs);
+  return errs.length ? { ok: false, errors: errs } : { ok: true, value };
+}
+
+export function validateChildInput(raw: unknown): Validated<ChildInput> {
+  const errs: ValidationError[] = [];
+  const value = child(raw, 'child', errs);
+  return errs.length ? { ok: false, errors: errs } : { ok: true, value };
+}
+
 export function validateRegistration(raw: unknown): Validated<RegistrationData> {
   const errs: ValidationError[] = [];
   const o = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>;
