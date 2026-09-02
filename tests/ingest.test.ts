@@ -43,6 +43,8 @@ const { readXlsx, readSheet, looksLikeXlsx, fromExcelSerial } =
 const { parseTabular } = await import('../packages/server/src/core/csv.ts');
 const { refreshAgeBands, outgrown, upcomingBirthdays, progressionSummary } =
   await import('../packages/server/src/core/progression.ts');
+const { familiesWorkbook, admissionsWorkbook, deFormula, exportCounts } =
+  await import('../packages/server/src/core/exports.ts');
 const { addChild, addGuardian, updateChild, updateGuardian, insertFamily,
         ageBandFor, ageLabel, monthsBetween } =
   await import('../packages/server/src/core/people.ts');
@@ -2511,5 +2513,70 @@ describe('moving a child up, by room', () => {
     assert.equal(row.suggestedProgram, 'Galaxy Stars');
     assert.equal(row.suggestedClassroomId, null, 'the only Galaxy room is closed');
     assert.match(row.reason, /no open room yet/);
+  });
+});
+
+// ------------------------------------------------------- colourful exports
+//
+// A CSV is right for feeding another system. This is the file somebody prints
+// and points at in a meeting, so it has to be a real workbook — and it has to
+// obey the same permission rules the screens do.
+
+describe('exporting a spreadsheet people can read', () => {
+  test('the families export is a real workbook with a sheet per question', () => {
+    const buf = familiesWorkbook({ sensitive: true });
+    assert.ok(looksLikeXlsx(buf));
+    const names = readXlsx(buf).map((s) => s.name);
+    assert.deepEqual(names, ['Overview', 'Families', 'Children', 'Guardians']);
+  });
+
+  test('a date of birth is dropped for roles that cannot see one, not blanked', () => {
+    // Blanking leaves the column in the file, and a column that is there can be
+    // un-hidden. The header must not exist at all.
+    const withDob = readXlsx(familiesWorkbook({ sensitive: true }))
+      .find((s) => s.name === 'Children')!;
+    const without = readXlsx(familiesWorkbook({ sensitive: false }))
+      .find((s) => s.name === 'Children')!;
+
+    assert.ok(withDob.rows.some((r) => r.includes('Date of birth')));
+    assert.equal(without.rows.some((r) => r.includes('Date of birth')), false);
+    assert.ok(without.rows.some((r) => r.some((cell) => /not included in this export/.test(cell))
+      || r.includes('Age group')));
+  });
+
+  test('the overview counts match the rows in the sheets behind it', () => {
+    const sheets = readXlsx(familiesWorkbook({ sensitive: true }));
+    const overview = sheets.find((s) => s.name === 'Overview')!;
+    const familiesSheet = sheets.find((s) => s.name === 'Families')!;
+
+    const stated = overview.rows.find((r) => r[0] === 'Families')?.[1];
+    const counts = exportCounts();
+    assert.equal(Number(stated), counts.families,
+      'a summary that disagrees with the sheet behind it is worse than no summary');
+    // Header, then one row per family, then the totals row.
+    assert.ok(familiesSheet.rows.length >= counts.families + 1);
+  });
+
+  test('a name that starts like a formula cannot execute in Excel', () => {
+    // "=cmd|' /c calc'!A1" in a spreadsheet is a real attack, and a child
+    // called "-Ana" trips the same rule.
+    assert.equal(deFormula('=SUM(A1)'), "'=SUM(A1)");
+    assert.equal(deFormula('-Ana'), "'-Ana");
+    assert.equal(deFormula('+1 780 555 0100'), "'+1 780 555 0100");
+    assert.equal(deFormula('@handle'), "'@handle");
+    // Excel strips leading whitespace before deciding, so a tab still counts.
+    assert.equal(deFormula('\t=cmd'), "'\t=cmd");
+    assert.equal(deFormula('Ngozi Okonkwo'), 'Ngozi Okonkwo');
+    assert.equal(deFormula(null), null);
+  });
+
+  test('the admissions workbook carries no child names', () => {
+    const sheets = readXlsx(admissionsWorkbook());
+    assert.deepEqual(sheets.map((s) => s.name),
+      ['Funnel', 'Where they came from', 'Tours', 'Registrations', 'Waitlist']);
+    // Family names appear, which is the point; a child's first name must not.
+    const everything = sheets.flatMap((s) => s.rows.flat()).join(' | ');
+    assert.equal(/\bChidi\b/.test(everything), false,
+      'this file goes into meetings — it should not identify children');
   });
 });

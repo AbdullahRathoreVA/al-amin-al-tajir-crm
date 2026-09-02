@@ -9,6 +9,7 @@ import { config } from './core/config.ts';
 import { newId, nowIso, plain, plainAll, safeJson, familyNameFrom } from './core/util.ts';
 import { findFamilyMatches } from './core/match.ts';
 import { progressionSummary } from './core/progression.ts';
+import { familiesWorkbook, admissionsWorkbook, exportCounts } from './core/exports.ts';
 import {
   insertFamily, upsertGuardian, addChild, addGuardian, updateChild, updateGuardian,
   reindexFamily, type ChildPatch, type GuardianPatch,
@@ -921,6 +922,51 @@ router.get('/api/v1/export/families', (c) => {
   };
   const csv = [headers.join(','), ...rows.map((r) => headers.map((h) => esc(r[h])).join(','))].join('\n');
   return { filename: `tiny-stars-families-${new Date().toISOString().slice(0, 10)}.csv`, csv, rows: rows.length };
+});
+
+/**
+ * The same records as a real workbook rather than a flat CSV.
+ *
+ * A CSV is right for feeding another system and wrong for what people actually
+ * do with an export, which is print it and point at it in a meeting. Sheets,
+ * frozen headers, formatted dates and money, and a summary that adds up.
+ */
+router.get('/api/v1/export/families.xlsx', (c) => {
+  c.require('data:export');
+  // Dates of birth follow the same rule as everywhere else: a role without
+  // child:read_sensitive gets the column dropped, not blanked, so a birthday
+  // cannot be recovered from a file that was passed on.
+  const sensitive = canSeeSensitive(c.user);
+  const buf = familiesWorkbook({ sensitive });
+  const counts = exportCounts();
+  logAccess(c.user!.id, 'export', 'family', undefined,
+    `workbook, ${counts.families} families, dob=${sensitive ? 'included' : 'omitted'}`);
+  return {
+    filename: `tiny-stars-families-${nowIso().slice(0, 10)}.xlsx`,
+    contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    base64: buf.toString('base64'),
+    bytes: buf.length,
+    counts,
+  };
+});
+
+router.get('/api/v1/export/admissions.xlsx', (c) => {
+  c.require('data:export');
+  const buf = admissionsWorkbook();
+  logAccess(c.user!.id, 'export', 'lead', undefined, 'admissions workbook');
+  return {
+    filename: `tiny-stars-admissions-${nowIso().slice(0, 10)}.xlsx`,
+    contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    base64: buf.toString('base64'),
+    bytes: buf.length,
+    counts: exportCounts(),
+  };
+});
+
+/** What each file would contain, so a person knows before downloading. */
+router.get('/api/v1/export/counts', (c) => {
+  c.require('data:export');
+  return { counts: exportCounts(), sensitive: canSeeSensitive(c.user) };
 });
 
 

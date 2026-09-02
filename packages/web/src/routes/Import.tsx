@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react';
 import { api } from '../lib/api.ts';
+import { useApi } from '../lib/hooks.ts';
 import { Link } from '../lib/router.tsx';
 import { Panel, Badge, Button, Spinner, ErrorNote } from '../ui/kit.tsx';
 
@@ -51,6 +52,11 @@ export function Import() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
+  // So the buttons can say what each file will contain before it is built.
+  const counts = useApi<{
+    counts: { families: number; children: number; guardians: number; leads: number; tours: number };
+    sensitive: boolean;
+  }>('/export/counts');
 
   function reset() {
     setUpload(null); setFileName(''); setParsed(null); setMapping({});
@@ -106,6 +112,22 @@ export function Import() {
     try { setResult(await api.post<Result>('/import/commit', { ...upload, mapping, source: fileName })); }
     catch (err) { setError(err instanceof Error ? err.message : 'The import failed'); }
     finally { setBusy(false); }
+  }
+
+  /** Workbooks come back as base64 because the API speaks JSON throughout. */
+  async function doWorkbook(kind: 'families.xlsx' | 'admissions.xlsx') {
+    setBusy(true); setError(null);
+    try {
+      const r = await api.get<{ filename: string; contentType: string; base64: string }>(
+        `/export/${kind}`);
+      const bytes = Uint8Array.from(atob(r.base64), (ch) => ch.charCodeAt(0));
+      const url = URL.createObjectURL(new Blob([bytes], { type: r.contentType }));
+      const a = document.createElement('a');
+      a.href = url; a.download = r.filename; a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not build that spreadsheet');
+    } finally { setBusy(false); }
   }
 
   async function doExport() {
@@ -349,14 +371,52 @@ export function Import() {
       {/* ---------------------------------------------------------- export */}
       <Panel title="Export">
         <p className="text-[13px]" style={{ color: 'var(--text-muted)' }}>
-          Every family, guardian and child as a CSV.
+          A spreadsheet you can read, not just one another system can. Sheets for families,
+          children and guardians, with a summary that adds up.
         </p>
-        <p className="mt-1 text-[11px]" style={{ color: 'var(--text-faint)' }}>
-          Exports are recorded in the access log. This file contains personal information about
-          children &mdash; treat it accordingly, and delete it when you are done.
+
+        <div className="mt-3 grid gap-2 sm:grid-cols-2">
+          <button
+            type="button" disabled={busy} onClick={() => void doWorkbook('families.xlsx')}
+            className="rounded-lg border p-3 text-left disabled:opacity-50"
+            style={{ borderColor: 'var(--line-strong)', background: 'var(--surface-inset)' }}
+          >
+            <span className="block text-[13px] font-medium">Families, children and guardians</span>
+            <span className="block text-[11px]" style={{ color: 'var(--text-faint)' }}>
+              {counts.data
+                ? <>{counts.data.counts.families} families &middot; {counts.data.counts.children} children
+                    {counts.data.sensitive ? '' : ' · no dates of birth for your role'}</>
+                : 'Excel workbook'}
+            </span>
+          </button>
+
+          <button
+            type="button" disabled={busy} onClick={() => void doWorkbook('admissions.xlsx')}
+            className="rounded-lg border p-3 text-left disabled:opacity-50"
+            style={{ borderColor: 'var(--line-strong)', background: 'var(--surface-inset)' }}
+          >
+            <span className="block text-[13px] font-medium">Admissions: funnel, tours, waitlist</span>
+            <span className="block text-[11px]" style={{ color: 'var(--text-faint)' }}>
+              {counts.data
+                ? <>{counts.data.counts.leads} leads &middot; {counts.data.counts.tours} tours
+                    &middot; no child names</>
+                : 'Excel workbook'}
+            </span>
+          </button>
+        </div>
+
+        <p className="mt-3 text-[11px]" style={{ color: 'var(--text-faint)' }}>
+          Exports are recorded in the access log. The families file contains personal information
+          about children &mdash; treat it accordingly, and delete it when you are done.
         </p>
-        <div className="mt-3">
-          <Button onClick={doExport} disabled={busy}>Download CSV</Button>
+
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <Button size="sm" variant="ghost" onClick={doExport} disabled={busy}>
+            Plain CSV instead
+          </Button>
+          <span className="text-[11px]" style={{ color: 'var(--text-faint)' }}>
+            for feeding another system
+          </span>
         </div>
       </Panel>
 
