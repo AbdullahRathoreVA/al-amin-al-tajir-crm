@@ -381,18 +381,16 @@ function CommandBar({ onClose }: { onClose: () => void }) {
   const actions = ACTIONS.filter((a) => !q.trim() || a.label.toLowerCase().includes(q.trim().toLowerCase()));
   const hits = res.data?.results ?? [];
 
+  // Two kinds of thing have a page of their own. Everything else is shown
+  // inside its family, and the index now carries which family that is, so a
+  // child's name opens the child's family instead of an unfiltered list.
   const hrefFor = (h: SearchHit): string => {
-    switch (h.entity_type) {
-      case 'family': return `/families/${h.entity_id}`;
-      case 'registration': return `/registrations/${h.entity_id}`;
-      case 'tour': return '/tours';
-      case 'lead': return '/leads';
-      case 'task': return '/tasks';
-      // A child, guardian or note is only meaningful in its family's context,
-      // and search does not return the family id for those - so send the
-      // operator to the list they can find it in rather than to a broken URL.
-      default: return '/families';
-    }
+    if (h.entity_type === 'family') return `/families/${h.entity_id}`;
+    if (h.entity_type === 'registration') return `/registrations/${h.entity_id}`;
+    if (h.family_id) return `/families/${h.family_id}`;
+    // Genuinely unowned — a task about nothing in particular. The task list is
+    // the right destination, not a family page that would be a guess.
+    return h.entity_type === 'task' ? '/tasks' : '/families';
   };
 
   const rows: { key: string; label: string; sub?: string; to: string }[] = [

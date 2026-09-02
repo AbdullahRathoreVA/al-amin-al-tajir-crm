@@ -49,6 +49,17 @@ so the app is same-origin in development exactly as it is in production.
 
 Password for all four: `demo1234`. They exist only in demo mode.
 
+To see a populated CRM without going anywhere near the real database:
+
+```bash
+npm run demo        # http://127.0.0.1:4319
+```
+
+It keeps its own database in `data/demo/`, forces `CRM_MODE=demo`, drops the
+ingest secret so it cannot be mistaken for the live target, and seeds itself on
+first run. `.env` cannot override any of that. Delete `data/demo/` to start it
+over.
+
 ### Real accounts
 
 Managed from the command line. The password is **never** an argument — arguments
@@ -217,10 +228,25 @@ npm run prod:check               # pessimistic preflight, non-zero while blocked
 npm run prod:harden -- --force   # remove demo accounts and synthetic families
 ```
 
-The Dockerfile has **not been built** — Docker was unavailable here. The layout
-it produces was verified instead: the exact runtime file set was assembled with
-no `node_modules` and confirmed to boot, migrate, serve and return its security
-headers. Expect small fixes on the first real `fly deploy`.
+### It is deployed
+
+The CRM is running on Fly.io at **<https://tiny-stars-crm.fly.dev>**, in
+`production` mode, on a persistent volume. Verified 2026-09-02: `/healthz`
+returns `{"ok":true}`, `/api/v1/ingest/ping` reports `configured: true`, every
+API route refuses an unauthenticated request with a `401`, the demo accounts are
+gone, and the security headers (CSP, HSTS, `frame-ancestors 'none'`) are all
+served.
+
+Running it locally still works exactly as described at the top of this file, and
+is still the right way to develop. Nothing about the deployment replaced that.
+
+**One caveat, and it is the important one.** `fly.dev` is the public internet,
+and this system holds records about children. Sign-in throttling, capability
+checks and a strong CSP are all in place, but a public login page is still a
+public login page. Putting it behind a private network — Tailscale, a WireGuard
+peer, or Fly's private networking with a VPN — is the remaining piece of work,
+and it is a deployment change rather than a code change. See
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
 ## Testing
 

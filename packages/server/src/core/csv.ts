@@ -419,7 +419,8 @@ export function commitImport(
 
       const label = one<{ name: string }>('SELECT name FROM families WHERE id = ?', familyId)?.name ?? 'family';
       indexEntity('family', familyId, label,
-        [r.guardianName, r.guardianEmail, r.guardianPhone, r.childFirstName].filter(Boolean).join(' '));
+        [r.guardianName, r.guardianEmail, r.guardianPhone, r.childFirstName].filter(Boolean).join(' '),
+        familyId);
     }
 
     run(`INSERT INTO settings (key, value_json, updated_at) VALUES (?,?,?)

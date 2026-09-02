@@ -8,7 +8,7 @@
  */
 import { one, many, run } from '../db/index.ts';
 import { newId, nowIso, plainAll } from './util.ts';
-import { indexEntity } from './search.ts';
+import { indexEntity, familyForRelated } from './search.ts';
 import { recordEvent, type Actor, SYSTEM } from './events.ts';
 
 export type Tier = 'critical' | 'high' | 'normal' | 'digest' | 'log';
@@ -105,7 +105,8 @@ export function createTask(t: TaskInput, actor: Actor = SYSTEM): string {
     t.dueAt ?? null, t.relatedType ?? null, t.relatedId ?? null,
     t.source ?? 'manual', t.reason ?? null, t.createdBy ?? null, now, now,
   );
-  indexEntity('task', id, t.title, [t.body, t.reason].filter(Boolean).join(' '));
+  indexEntity('task', id, t.title, [t.body, t.reason].filter(Boolean).join(' '),
+    familyForRelated(t.relatedType, t.relatedId));
   recordEvent({
     entityType: 'task', entityId: id, type: 'created', actor,
     summary: `Task created: ${t.title}`,

@@ -9,7 +9,7 @@ import { config } from './core/config.ts';
 import { newId, nowIso, plain, plainAll, safeJson } from './core/util.ts';
 import { login, logout, capabilitiesFor, canSeeSensitive, can, sessionsFor, revokeSession } from './core/auth.ts';
 import { recordEvent, familyTimeline, timelineFor, changesSince, diff, logAccess, historyOf, type Actor } from './core/events.ts';
-import { search as fullTextSearch, indexEntity, type Indexable } from './core/search.ts';
+import { search as fullTextSearch, indexEntity, familyForRelated, type Indexable } from './core/search.ts';
 import { notify, unreadFor, setNotificationState, createTask, completeTask } from './core/notify.ts';
 import {
   todaySummary, attention, pipeline, programHealth, dataHealth, systemHealth,
@@ -525,7 +525,10 @@ router.patch('/api/v1/tasks/:id', (c) => {
   tx(() => {
     run(`UPDATE tasks SET ${sets.join(', ')}, updated_at = ? WHERE id = ?`, ...params, nowIso(), id);
     const after = plain(one<Record<string, unknown>>('SELECT * FROM tasks WHERE id = ?', id))!;
-    if (typeof after.title === 'string') indexEntity('task', id, after.title, String(after.body ?? ''));
+    if (typeof after.title === 'string') {
+      indexEntity('task', id, after.title, String(after.body ?? ''),
+        familyForRelated(after.related_type as string | null, after.related_id as string | null));
+    }
     recordEvent({
       entityType: 'task', entityId: id, type: 'updated', actor: actorOf(c),
       summary: `Task updated: ${String(after.title)}`, before, after,
@@ -552,7 +555,8 @@ router.post('/api/v1/notes', (c) => {
   tx(() => {
     run('INSERT INTO notes (id, entity_type, entity_id, body, author_id, created_at) VALUES (?,?,?,?,?,?)',
       id, entityType, entityId, noteBody, c.user!.id, now);
-    indexEntity('note', id, `Note on ${entityType}`, noteBody);
+    indexEntity('note', id, `Note on ${entityType}`, noteBody,
+      familyForRelated(entityType, entityId));
     recordEvent({
       entityType, entityId, type: 'note_added', actor: actorOf(c),
       summary: `Note added: ${noteBody.slice(0, 80)}`,

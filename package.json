@@ -19,6 +19,7 @@
     "db:migrate": "node --disable-warning=ExperimentalWarning packages/server/src/db/migrate.ts",
     "db:seed": "node --disable-warning=ExperimentalWarning packages/server/src/seed/demo.ts",
     "db:reset": "node --disable-warning=ExperimentalWarning packages/server/src/seed/reset.ts",
+    "demo": "node --disable-warning=ExperimentalWarning scripts/demo-instance.mjs",
     "test": "node --disable-warning=ExperimentalWarning --test tests/*.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "scan:secrets": "node scripts/scan-secrets.mjs",

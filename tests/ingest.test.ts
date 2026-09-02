@@ -23,7 +23,8 @@ const { migrateUp } = await import('../packages/server/src/db/migrate.ts');
 const { seedReference } = await import('../packages/server/src/seed/demo.ts');
 const { ingest } = await import('../packages/server/src/ingest/pipeline.ts');
 const { validateEnvelope, validateRegistration } = await import('../packages/shared/src/contract.ts');
-const { reindexAll, search } = await import('../packages/server/src/core/search.ts');
+const { reindexAll, search, searchIndexNeedsRebuild, familyForRelated } =
+  await import('../packages/server/src/core/search.ts');
 const { hashPassword, verifyPassword, can, createUser, login, userForToken } =
   await import('../packages/server/src/core/auth.ts');
 const { verifySignature } = await import('../packages/server/src/http.ts');
@@ -359,6 +360,54 @@ describe('search', () => {
     // "NEAR" is matched as the literal word, not as the FTS NEAR operator: a
     // real operator would have thrown on this malformed usage.
     assert.doesNotThrow(() => search('NEAR(Whitfield Lindqvist'));
+  });
+
+  // The point of these: a child's first name is the most natural thing anyone
+  // types, and until the index carried an owning family it was the one search
+  // whose result could not be opened.
+  test("a child's name resolves to the family that child is in", () => {
+    reindexAll();
+    const family = one<{ id: string }>("SELECT id FROM families WHERE name LIKE '%Whitfield%'");
+    assert.ok(family, 'expected the Whitfield family from the ingestion tests');
+
+    const hit = search('Rosa').find((h) => h.entity_type === 'child');
+    assert.ok(hit, 'expected a child hit for Rosa');
+    assert.equal(hit.family_id, family.id);
+  });
+
+  test('a guardian hit carries their family too', () => {
+    reindexAll();
+    const family = one<{ id: string }>("SELECT id FROM families WHERE name LIKE '%Whitfield%'");
+    const hit = search('Dana').find((h) => h.entity_type === 'guardian');
+    assert.ok(hit, 'expected a guardian hit for Dana');
+    assert.equal(hit.family_id, family!.id);
+  });
+
+  test('nothing that belongs to a family is indexed without it', () => {
+    reindexAll();
+    // A task may legitimately be about nothing. Everything else having a null
+    // family is the bug this guards against, and it is invisible in the UI
+    // until someone searches and lands on an unfiltered list.
+    const orphans = many<{ entity_type: string; entity_id: string; family_id: string | null }>(
+      `SELECT entity_type, entity_id, family_id FROM search_index
+        WHERE family_id IS NULL AND entity_type NOT IN ('task', 'note')`);
+    assert.deepEqual(orphans, [], `these would open nowhere: ${JSON.stringify(orphans)}`);
+  });
+
+  test('a polymorphic reference to something unknown resolves to null, not a guess', () => {
+    assert.equal(familyForRelated('spaceship', 'anything'), null);
+    assert.equal(familyForRelated(null, null), null);
+    assert.equal(familyForRelated('child', 'no-such-child'), null);
+  });
+
+  test('an emptied index is detected and rebuilt rather than looking like no data', () => {
+    execSql('DELETE FROM search_index');
+    assert.equal(searchIndexNeedsRebuild(), true);
+    assert.deepEqual(search('Whitfield'), [], 'precondition: the index really is empty');
+
+    assert.ok(reindexAll() > 0);
+    assert.equal(searchIndexNeedsRebuild(), false);
+    assert.ok(search('Whitfield').length > 0);
   });
 });
 

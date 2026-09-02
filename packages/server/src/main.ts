@@ -15,6 +15,7 @@ import { registerTransport, startSyncSchedule } from './core/sync.ts';
 import { sheetsTransport } from './core/transports/sheets.ts';
 import { emailTransport } from './core/transports/email.ts';
 import { seedReference, referenceIsPresent } from './core/reference.ts';
+import { reindexAll, searchIndexNeedsRebuild } from './core/search.ts';
 import { handle, securityHeaders } from './http.ts';
 import { router } from './routes.ts';
 
@@ -132,6 +133,14 @@ const ref = seedReference();
 if (ref.stages || ref.programs) {
   console.log(`[crm] seeded ${ref.stages} lead stage(s) and ${ref.programs} program(s)`);
 }
+// The FTS table is a derived cache, and a migration that rebuilds it leaves it
+// empty. Refill it here rather than letting the first person to use the search
+// box discover the gap — a search that silently returns nothing looks like an
+// empty database, not a missing index.
+if (searchIndexNeedsRebuild()) {
+  console.log(`[crm] search   index empty, rebuilding… ${reindexAll()} record(s)`);
+}
+
 const newTemplates = seedTemplates();
 const newAutomations = seedAutomations();
 if (newAutomations) console.log(`[crm] seeded ${newAutomations} automation(s)`);

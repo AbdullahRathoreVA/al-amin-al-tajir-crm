@@ -133,4 +133,7 @@ export interface RegistrationRow {
 
 export interface SearchHit {
   entity_type: string; entity_id: string; title: string; snippet: string; rank: number;
+  /** The family the hit belongs to. Null only for things that belong to no
+   *  family, such as a task about nothing in particular. */
+  family_id: string | null;
 }

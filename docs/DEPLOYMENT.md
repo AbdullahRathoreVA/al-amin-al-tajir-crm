@@ -54,12 +54,52 @@ fly ssh console -C "sh -lc 'cd /app && CRM_NEW_PASSWORD=... node --disable-warni
 `fly.toml` pins `max_machines_running = 1` deliberately. SQLite has one writer,
 and two machines would each hold their own volume and silently diverge.
 
-**The Dockerfile has not been built.** Docker was unavailable on the machine it
-was written on. What HAS been verified is the layout it produces: the runtime
-stage's exact file set was assembled in a temp directory with no `node_modules`
-at all, and the server booted, ran its migrations, served `/healthz`, returned
-the security headers and served the SPA. Expect to fix small things on the first
-real `fly deploy`.
+### This is live
+
+The deploy has happened. The CRM runs at **<https://tiny-stars-crm.fly.dev>** in
+`production` mode on the `crm_data` volume.
+
+Checked from outside on 2026-09-02:
+
+| Check | Result |
+|---|---|
+| `GET /healthz` | `{"ok":true}` |
+| `GET /api/v1/ingest/ping` | `{"ok":true,"contractVersion":1,"configured":true,"mode":"production"}` |
+| `GET /api/v1/families` with no session | `401` |
+| `GET /api/v1/auth/me` with no session | `401` |
+| `POST /api/v1/auth/login` as `owner@demo.local` | rejected — the demo accounts are gone |
+| Security headers | CSP (no `unsafe-inline` on scripts), HSTS, `frame-ancestors 'none'`, `nosniff`, COOP/CORP |
+
+Local still works and is still the right way to develop; `npm start` on
+<http://127.0.0.1:4317> is unaffected by any of this, and `npm run demo` gives
+you a throwaway populated instance on 4319 that cannot reach the real database.
+
+The Dockerfile is no longer theoretical — it builds and boots. The two bugs
+below were found by simulating the image layout before Docker was available,
+and both were real; they are kept here because they are the two ways this
+particular build can break again.
+
+### Still to do: get it off the public internet
+
+`fly.dev` is reachable by anyone. What protects it today is real — scrypt
+password hashing, per-account and per-address sign-in throttling, server-side
+capability checks, session tokens stored as hashes, a strict CSP — but the
+correct posture for a system holding children's records is that the login page
+should not be reachable at all from the open web.
+
+Options, cheapest first:
+
+1. **Tailscale (free tier).** Put the machine on a tailnet and remove the public
+   service. Staff install the client once. No code change.
+2. **Fly private networking + WireGuard.** Same idea without a third party;
+   `flyctl` issues peer configs. More setup per device.
+3. **A allow-list at the edge.** Weakest of the three — a daycare's staff are
+   not on fixed addresses — but better than nothing as an interim step.
+
+Whichever is chosen, `CRM_INGEST_URL` on the website must be able to reach it,
+so the ingest endpoint is the one thing that may need to stay publicly routable.
+That is an acceptable exception: it is signature-authenticated, replay-protected
+and cannot read anything back.
 
 Two bugs were found and fixed by doing that simulation, both of which would have
 crash-looped the container on boot:

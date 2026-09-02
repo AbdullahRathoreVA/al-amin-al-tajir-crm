@@ -183,7 +183,7 @@ function reindexFamily(familyId: string): void {
     `SELECT group_concat(COALESCE(first_name,'') || ' ' || COALESCE(last_name,''), ' ') AS blob
        FROM children WHERE family_id = ?`, familyId)?.blob;
   const body = [f.status, f.source, guardianBlob, childBlob].filter(Boolean).join(' ');
-  indexEntity('family', f.id, f.name, body);
+  indexEntity('family', f.id, f.name, body, f.id);
 }
 
 /** Queue an outbound sync. Never called inside the CRM write transaction's
@@ -339,9 +339,9 @@ function handleRegistration(env: EventEnvelope<RegistrationData>): IngestResult 
   });
 
   indexEntity('registration', regId, `Registration: ${childLabel}`,
-    [d.programInterest, d.desiredStart, d.notes].filter(Boolean).join(' '));
+    [d.programInterest, d.desiredStart, d.notes].filter(Boolean).join(' '), familyId);
   indexEntity('child', childId, [d.child.firstName, d.child.lastName].filter(Boolean).join(' '),
-    [d.child.ageBand, d.programInterest].filter(Boolean).join(' '));
+    [d.child.ageBand, d.programInterest].filter(Boolean).join(' '), familyId);
   reindexFamily(familyId);
 
   // Follow-up is created here, not left to someone remembering. (spec 28)
@@ -413,7 +413,7 @@ function handleTour(env: EventEnvelope<TourRequestData>, kind: 'tour' | 'waitlis
       summary: `Tour requested via the website${d.preferredDates?.length ? ` (prefers ${d.preferredDates[0]})` : ''}`,
       after: { status: 'requested', preferred: d.preferredDates ?? null },
     });
-    indexEntity('tour', tourId, `Tour request: ${d.guardian.fullName}`, d.notes ?? '');
+    indexEntity('tour', tourId, `Tour request: ${d.guardian.fullName}`, d.notes ?? '', familyId);
   } else {
     run(
       `INSERT INTO waitlist (id, family_id, child_id, status, added_at, notes, created_at, updated_at)

@@ -6,6 +6,12 @@
       "runtimeExecutable": "node",
       "runtimeArgs": ["--disable-warning=ExperimentalWarning", "packages/server/src/main.ts"],
       "port": 4317
+    },
+    {
+      "name": "crm-demo",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["--disable-warning=ExperimentalWarning", "scripts/demo-instance.mjs"],
+      "port": 4319
     }
   ]
 }
