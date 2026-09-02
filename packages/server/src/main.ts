@@ -16,6 +16,7 @@ import { sheetsTransport } from './core/transports/sheets.ts';
 import { emailTransport } from './core/transports/email.ts';
 import { seedReference, referenceIsPresent } from './core/reference.ts';
 import { reindexAll, searchIndexNeedsRebuild } from './core/search.ts';
+import { startAgeSchedule } from './core/progression.ts';
 import { handle, securityHeaders } from './http.ts';
 import { router } from './routes.ts';
 
@@ -153,6 +154,11 @@ startBackupSchedule(24, 14);
 
 // Hourly sweep for the time-based rules. Event-driven ones fire inline.
 startAutomationSchedule(60);
+
+// Children have birthdays. Age groups are recomputed from the date of birth
+// and corrected; rooms are only ever reported, never changed, because moving a
+// child depends on space, ratios and their parents.
+startAgeSchedule(24);
 
 // Registered unconditionally; it reports itself as not connected until the
 // Google credentials exist. Registering only when configured would make an

@@ -8,6 +8,7 @@ import { one, many, run, tx } from './db/index.ts';
 import { config } from './core/config.ts';
 import { newId, nowIso, plain, plainAll, safeJson, familyNameFrom } from './core/util.ts';
 import { findFamilyMatches } from './core/match.ts';
+import { progressionSummary } from './core/progression.ts';
 import {
   insertFamily, upsertGuardian, addChild, addGuardian, updateChild, updateGuardian,
   reindexFamily, type ChildPatch, type GuardianPatch,
@@ -1166,6 +1167,17 @@ function dayParam(c: Ctx): string {
   if (!isDay(raw)) throw badRequest('day must be a date in YYYY-MM-DD form');
   return raw;
 }
+
+/**
+ * Who has outgrown their room, and whose birthday is coming.
+ *
+ * Read-only on purpose. The move itself goes through the existing placement
+ * endpoint, which means a person decides it and the event log records who.
+ */
+router.get('/api/v1/progression', (c) => {
+  c.require('classroom:read');
+  return progressionSummary();
+});
 
 router.get('/api/v1/classrooms', (c) => {
   const user = c.require('classroom:read');

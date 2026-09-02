@@ -482,7 +482,19 @@ export function assignChild(
 
   const sets: string[] = [];
   const params: (string | number | null)[] = [];
-  if (patch.classroomId !== undefined) { sets.push('classroom_id = ?'); params.push(patch.classroomId); }
+  if (patch.classroomId !== undefined) {
+    sets.push('classroom_id = ?'); params.push(patch.classroomId);
+    // A room belongs to a program, so the child's program follows the room.
+    // Without this the two drift apart the first time anyone is moved, and
+    // then "which program is this child in" has two answers that disagree.
+    // Clearing the room leaves the program alone: a child between rooms has
+    // not left the program.
+    if (patch.classroomId) {
+      const programId = one<{ program_id: string | null }>(
+        'SELECT program_id FROM classrooms WHERE id = ?', patch.classroomId)?.program_id ?? null;
+      if (programId) { sets.push('program_id = ?'); params.push(programId); }
+    }
+  }
   if (patch.status !== undefined) { sets.push('status = ?'); params.push(patch.status); }
   if (!sets.length) return before;
 

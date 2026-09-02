@@ -9,6 +9,7 @@ import { one, many } from '../db/index.ts';
 import { channelStatus, SYNC_CHANNELS } from './sync.ts';
 import { dayBounds, nowIso, plainAll } from './util.ts';
 import { newestBackup } from './backup.ts';
+import { outgrown } from './progression.ts';
 
 const count = (sql: string, ...p: (string | number | null)[]): number =>
   Number(one<{ n: number }>(sql, ...p)?.n ?? 0);
@@ -66,6 +67,18 @@ export function attention(): AttentionItem[] {
   const items: AttentionItem[] = [];
 
   const push = (i: AttentionItem) => { if (i.count > 0) items.push(i); };
+
+  // Children who have aged past their room. Nothing is moved automatically —
+  // that depends on space, ratios and the parents — so it surfaces here for a
+  // person to decide. Counted through the same function the screen uses, so
+  // the number on the radar and the list behind it cannot disagree.
+  push({
+    id: 'children-outgrown', severity: 'warning',
+    label: 'children have outgrown their room',
+    count: outgrown().length,
+    link: '/attendance?view=progression',
+    detail: 'Old enough for the next room, and still in the last one',
+  });
 
   push({
     id: 'followups-overdue', severity: 'critical',

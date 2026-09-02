@@ -19,6 +19,7 @@ import {
   Panel, Button, Badge, Stat, Spinner, ErrorNote, Empty, NotMeasured, clockTime, toneForStatus,
 } from '../ui/kit.tsx';
 import { RegisterSetup } from './RegisterSetup.tsx';
+import { Progression } from '../ui/Progression.tsx';
 
 interface RegisterRow {
   child_id: string;
@@ -117,6 +118,12 @@ export function Attendance() {
       <RegisterSetup
         canEdit={me.data?.capabilities.includes('classroom:write') ?? false}
         onChanged={() => { reg.reload(); rooms.reload(); }}
+      />
+
+      {/* Children grow. Age groups correct themselves; rooms wait for a person. */}
+      <Progression
+        canMove={me.data?.capabilities.includes('child:write') ?? false}
+        onMoved={() => { reg.reload(); rooms.reload(); }}
       />
 
       {/* ------------------------------------------------------------ ratios */}

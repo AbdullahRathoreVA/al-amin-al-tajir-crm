@@ -39,13 +39,24 @@ export const STAGES: [string, string, number, number, number][] = [
  * a number would make the occupancy figures fiction. The UI shows "not
  * measured" until somebody sets it.
  */
-export const PROGRAMS: [string, string, string][] = [
-  ['twinkle-stars', 'Twinkle Stars', '12-18 months'],
-  ['comet-stars', 'Comet Stars', '18 months - 3 years'],
-  ['nova-stars', 'Nova Stars', '3-5 years'],
-  ['galaxy-stars', 'Galaxy Stars', '5-6 years'],
-  ['cosmic-stars', 'Cosmic Stars', '6-12 years'],
-  ['learning-adventures', 'Learning Adventures', 'Ages 2-5'],
+/**
+ * slug, name, age label, min months (inclusive), max months (exclusive),
+ * and whether the program is a rung on the normal progression.
+ *
+ * The months are what lets the CRM answer "who has outgrown their room?".
+ * Learning Adventures spans ages 2 to 5 and deliberately overlaps three other
+ * rooms, so it carries real bounds but sits out of the ladder — otherwise every
+ * toddler would look misplaced. See migration 011.
+ *
+ * Tiny Stars has no infant room, so nothing here covers under 12 months.
+ */
+export const PROGRAMS: [string, string, string, number | null, number | null, number][] = [
+  ['twinkle-stars', 'Twinkle Stars', '12-18 months', 12, 18, 1],
+  ['comet-stars', 'Comet Stars', '18 months - 3 years', 18, 36, 1],
+  ['nova-stars', 'Nova Stars', '3-5 years', 36, 60, 1],
+  ['galaxy-stars', 'Galaxy Stars', '5-6 years', 60, 72, 1],
+  ['cosmic-stars', 'Cosmic Stars', '6-12 years', 72, 144, 1],
+  ['learning-adventures', 'Learning Adventures', 'Ages 2-5', 24, 60, 0],
 ];
 
 export function seedReference(): { stages: number; programs: number } {
@@ -60,10 +71,12 @@ export function seedReference(): { stages: number; programs: number } {
     stages++;
   }
 
-  for (const [i, [slug, name, age]] of PROGRAMS.entries()) {
+  for (const [i, [slug, name, age, minM, maxM, ladder]] of PROGRAMS.entries()) {
     if (one('SELECT id FROM programs WHERE slug = ?', slug)) continue;
-    run(`INSERT INTO programs (id, slug, name, age_label, capacity, active, sort_order, created_at)
-         VALUES (?,?,?,?,NULL,1,?,?)`, newId(), slug, name, age, i * 10, now);
+    run(`INSERT INTO programs (id, slug, name, age_label, capacity, active, sort_order, created_at,
+           min_months, max_months, age_ladder)
+         VALUES (?,?,?,?,NULL,1,?,?,?,?,?)`,
+      newId(), slug, name, age, i * 10, now, minM, maxM, ladder);
     programs++;
   }
 

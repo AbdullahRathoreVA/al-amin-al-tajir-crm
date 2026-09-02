@@ -41,6 +41,8 @@ const { buildWorkbook } = await import('../packages/server/src/core/xlsx.ts');
 const { readXlsx, readSheet, looksLikeXlsx, fromExcelSerial } =
   await import('../packages/server/src/core/xlsx-read.ts');
 const { parseTabular } = await import('../packages/server/src/core/csv.ts');
+const { refreshAgeBands, outgrown, upcomingBirthdays, progressionSummary } =
+  await import('../packages/server/src/core/progression.ts');
 const { addChild, addGuardian, updateChild, updateGuardian, insertFamily,
         ageBandFor, ageLabel, monthsBetween } =
   await import('../packages/server/src/core/people.ts');
@@ -2298,5 +2300,216 @@ describe('reading a real .xlsx', () => {
     // The reader only ever looks at <v>, so B1 (no cached value) is empty.
     const rows = readSheet(sheetXml);
     assert.deepEqual(rows[0], ['2', '']);
+  });
+});
+
+// ------------------------------------------------------- growing up
+//
+// The distinction these protect: an age band is a fact about a birthday and is
+// corrected automatically; a room is a decision and is only ever reported.
+
+describe('children growing into the next room', () => {
+  const STAFF = { type: 'user' as const, id: null, source: 'manual' };
+  const yearsAgo = (y: number, months = 0) => {
+    const d = new Date();
+    d.setFullYear(d.getFullYear() - y);
+    d.setMonth(d.getMonth() - months);
+    return d.toISOString().slice(0, 10);
+  };
+  const programId = (slug: string) =>
+    one<{ id: string }>('SELECT id FROM programs WHERE slug = ?', slug)!.id;
+
+  test('a stale age band is corrected from the date of birth', () => {
+    const familyId = insertFamily('Adeyemi family', 'manual', null, STAFF);
+    const childId = addChild(familyId, { firstName: 'Tayo', ageBand: 'Under 12 months' }, STAFF);
+    // Set a birthday directly, leaving the band wrong, exactly as a real record
+    // drifts: correct on the day it was typed, stale a year later.
+    execSql('UPDATE children SET date_of_birth = ? WHERE id = ?', yearsAgo(4), childId);
+
+    const changed = refreshAgeBands(STAFF);
+    assert.ok(changed.some((c) => c.childId === childId && c.to === '3-5 years'));
+    assert.equal(
+      one<{ age_band: string }>('SELECT age_band FROM children WHERE id = ?', childId)?.age_band,
+      '3-5 years');
+  });
+
+  test('correcting a band is written to the append-only log', () => {
+    const familyId = insertFamily('Kowalski family', 'manual', null, STAFF);
+    const childId = addChild(familyId, { firstName: 'Ida', ageBand: '12-18 months' }, STAFF);
+    execSql('UPDATE children SET date_of_birth = ? WHERE id = ?', yearsAgo(5, 1), childId);
+    refreshAgeBands(STAFF);
+
+    const summaries = many<{ summary: string }>(
+      "SELECT summary FROM events WHERE entity_id = ? AND type = 'updated'", childId);
+    assert.ok(summaries.some((e) => /Ida moved from 12-18 months to 5-6 years/.test(e.summary)),
+      `no band-change event found, got: ${summaries.map((e) => e.summary).join(' | ')}`);
+  });
+
+  test('a child with no birthday keeps the band a person typed', () => {
+    const familyId = insertFamily('Moreau family', 'manual', null, STAFF);
+    const childId = addChild(familyId, { firstName: 'Elise', ageBand: '18 months - 3 years' }, STAFF);
+    refreshAgeBands(STAFF);
+    assert.equal(
+      one<{ age_band: string }>('SELECT age_band FROM children WHERE id = ?', childId)?.age_band,
+      '18 months - 3 years', 'a guess must not overwrite the only information there is');
+  });
+
+  test('a child past their room shows up, with the room that fits and why', () => {
+    const familyId = insertFamily('Novak family', 'manual', null, STAFF);
+    const childId = addChild(familyId, { firstName: 'Petra' }, STAFF);
+    // Four years old, still in the 18 months - 3 years room.
+    execSql('UPDATE children SET date_of_birth = ?, status = ?, program_id = ? WHERE id = ?',
+      yearsAgo(4), 'enrolled', programId('comet-stars'), childId);
+
+    const row = outgrown().find((o) => o.childId === childId);
+    assert.ok(row, 'a four-year-old in the toddler room must be flagged');
+    assert.equal(row.currentProgram, 'Comet Stars');
+    assert.equal(row.suggestedProgram, 'Nova Stars');
+    assert.match(row.reason, /4 years old/);
+  });
+
+  test('nobody is moved: the flag is a report, not an action', () => {
+    const familyId = insertFamily('Bianchi family', 'manual', null, STAFF);
+    const childId = addChild(familyId, { firstName: 'Luca' }, STAFF);
+    const comet = programId('comet-stars');
+    execSql('UPDATE children SET date_of_birth = ?, status = ?, program_id = ? WHERE id = ?',
+      yearsAgo(4), 'enrolled', comet, childId);
+
+    outgrown();
+    refreshAgeBands(STAFF);
+    assert.equal(
+      one<{ program_id: string }>('SELECT program_id FROM children WHERE id = ?', childId)?.program_id,
+      comet, 'moving a child depends on space, ratios and their parents — never do it silently');
+  });
+
+  test('the boundary is inclusive at the bottom and exclusive at the top', () => {
+    const familyId = insertFamily('Rossi family', 'manual', null, STAFF);
+    const child = addChild(familyId, { firstName: 'Gia' }, STAFF);
+    const comet = programId('comet-stars');   // 18 to 36 months
+
+    // Exactly 36 months: past Comet Stars, so flagged.
+    execSql('UPDATE children SET date_of_birth = ?, status = ?, program_id = ? WHERE id = ?',
+      yearsAgo(3), 'enrolled', comet, child);
+    assert.ok(outgrown().some((o) => o.childId === child), '36 months is out of an 18-36 room');
+
+    // A month short of three: still in the room, so not flagged.
+    execSql('UPDATE children SET date_of_birth = ? WHERE id = ?', yearsAgo(2, 11), child);
+    assert.equal(outgrown().some((o) => o.childId === child), false);
+  });
+
+  test('a prospective child is not "outgrown" — they have not been placed', () => {
+    const familyId = insertFamily('Ferrand family', 'manual', null, STAFF);
+    const childId = addChild(familyId, { firstName: 'Colette' }, STAFF);
+    execSql('UPDATE children SET date_of_birth = ?, program_id = ? WHERE id = ?',
+      yearsAgo(5), programId('comet-stars'), childId);
+    assert.equal(outgrown().some((o) => o.childId === childId), false);
+  });
+
+  test('an upcoming birthday is found, and the year wrap does not break it', () => {
+    // Fixed dates, not "five days from now": this machine is UTC+5, so at two
+    // in the morning "today" locally is still yesterday in UTC and a relative
+    // test drifts by a day depending on the hour it runs.
+    const familyId = insertFamily('Andersen family', 'manual', null, STAFF);
+    const childId = addChild(familyId, { firstName: 'Freja' }, STAFF);
+    execSql('UPDATE children SET date_of_birth = ?, status = ? WHERE id = ?',
+      '2023-09-08', 'enrolled', childId);
+
+    const hit = upcomingBirthdays(14, new Date('2026-09-03T12:00:00Z'))
+      .find((b) => b.childId === childId);
+    assert.ok(hit, 'a birthday five days away must appear in a fortnight view');
+    assert.equal(hit.inDays, 5);
+    assert.equal(hit.turning, 3);
+    assert.equal(hit.date, '2026-09-08');
+  });
+
+  test('a birthday in January is found from December, not missed for a year', () => {
+    const familyId = insertFamily('Lindgren family', 'manual', null, STAFF);
+    const childId = addChild(familyId, { firstName: 'Alva' }, STAFF);
+    execSql('UPDATE children SET date_of_birth = ?, status = ? WHERE id = ?',
+      '2024-01-02', 'enrolled', childId);
+
+    const hit = upcomingBirthdays(14, new Date('2026-12-28T12:00:00Z'))
+      .find((b) => b.childId === childId);
+    assert.ok(hit, 'comparing dates rather than month-and-day loses every new-year birthday');
+    assert.equal(hit.date, '2027-01-02');
+    assert.equal(hit.inDays, 5);
+    assert.equal(hit.turning, 3);
+  });
+
+  test('the summary says which rooms still have no age range set', () => {
+    const s = progressionSummary();
+    assert.ok(Array.isArray(s.outgrown));
+    assert.ok(Array.isArray(s.birthdays));
+    // Every program Tiny Stars actually runs has bounds. Programs created by
+    // other tests in this file deliberately have none, and showing up here is
+    // the feature working: a room with no age range is reported, not guessed at.
+    const named = (s.programsWithoutAges as { name: string }[]).map((p) => p.name);
+    for (const real of ['Twinkle Stars', 'Comet Stars', 'Nova Stars', 'Galaxy Stars', 'Cosmic Stars']) {
+      assert.equal(named.includes(real), false, `${real} should have an age range seeded`);
+    }
+  });
+});
+
+describe('moving a child up, by room', () => {
+  const STAFF = { type: 'user' as const, id: null, source: 'manual' };
+  const yearsAgo = (y: number) => {
+    const d = new Date(); d.setFullYear(d.getFullYear() - y);
+    return d.toISOString().slice(0, 10);
+  };
+  const programId = (slug: string) =>
+    one<{ id: string }>('SELECT id FROM programs WHERE slug = ?', slug)!.id;
+
+  test('the room a child sits in wins over the program somebody recorded', () => {
+    // A child placed in a Comet Stars room but with nova-stars still on their
+    // record. Their actual room is the truth, so at four they are fine.
+    const comet = createClassroom('Comets A', { programId: programId('comet-stars'), capacity: 10 }, STAFF);
+    const familyId = insertFamily('Duarte family', 'manual', null, STAFF);
+    const childId = addChild(familyId, { firstName: 'Ines' }, STAFF);
+    execSql('UPDATE children SET date_of_birth = ?, status = ?, program_id = ?, classroom_id = ? WHERE id = ?',
+      yearsAgo(4), 'enrolled', programId('nova-stars'), String(comet.id), childId);
+
+    const row = outgrown().find((o) => o.childId === childId);
+    assert.ok(row, 'the room says Comet Stars, and a four-year-old has outgrown it');
+    assert.equal(row.currentProgram, 'Comet Stars');
+  });
+
+  test('the suggestion names a real room, and moving puts the child in it', () => {
+    const comet = createClassroom('Comets B', { programId: programId('comet-stars'), capacity: 10 }, STAFF);
+    const nova = createClassroom('Novas B', { programId: programId('nova-stars'), capacity: 12 }, STAFF);
+    const familyId = insertFamily('Halim family', 'manual', null, STAFF);
+    const childId = addChild(familyId, { firstName: 'Sami' }, STAFF);
+    execSql('UPDATE children SET date_of_birth = ?, status = ?, classroom_id = ? WHERE id = ?',
+      yearsAgo(4), 'enrolled', String(comet.id), childId);
+
+    const row = outgrown().find((o) => o.childId === childId);
+    assert.ok(row);
+    assert.equal(row.suggestedProgram, 'Nova Stars');
+    assert.ok(row.suggestedClassroomId, 'a suggestion with no room to move into is not actionable');
+
+    assignChild(childId, { classroomId: row.suggestedClassroomId! }, STAFF);
+    const after = one<{ classroom_id: string; program_id: string }>(
+      'SELECT classroom_id, program_id FROM children WHERE id = ?', childId);
+    assert.equal(after?.classroom_id, String(nova.id));
+    // The whole reason the program follows the room: otherwise the two
+    // disagree the first time anybody is moved.
+    assert.equal(after?.program_id, programId('nova-stars'));
+    assert.equal(outgrown().some((o) => o.childId === childId), false);
+  });
+
+  test('a program with no open room is reported honestly, not silently skipped', () => {
+    const galaxy = createClassroom('Galaxy Z', { programId: programId('galaxy-stars'), capacity: 8 }, STAFF);
+    updateClassroom(String(galaxy.id), { active: false }, STAFF);
+
+    const familyId = insertFamily('Terzi family', 'manual', null, STAFF);
+    const childId = addChild(familyId, { firstName: 'Deniz' }, STAFF);
+    const room = createClassroom('Novas C', { programId: programId('nova-stars'), capacity: 5 }, STAFF);
+    execSql('UPDATE children SET date_of_birth = ?, status = ?, classroom_id = ? WHERE id = ?',
+      yearsAgo(5), 'enrolled', String(room.id), childId);
+
+    const row = outgrown().find((o) => o.childId === childId);
+    assert.ok(row);
+    assert.equal(row.suggestedProgram, 'Galaxy Stars');
+    assert.equal(row.suggestedClassroomId, null, 'the only Galaxy room is closed');
+    assert.match(row.reason, /no open room yet/);
   });
 });
