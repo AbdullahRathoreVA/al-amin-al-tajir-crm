@@ -475,7 +475,8 @@ export const HELP: HelpTopic[] = [
       'To get it back out beautifully: Import → Export → "Families, children and guardians".',
     ],
     notes: [
-      'Do this again whenever you want to catch up. Families already here are matched rather than duplicated, so re-importing the same export does not double anybody.',
+      'Do this every month if you like. Lillio gives you the WHOLE roll each time, including everybody you already imported — and that is fine. A child is recognised by their first name, surname and date of birth together, so re-importing the same export adds nobody twice. The preview tells you before you commit: "0 to create, 134 to update" means everyone is already here.',
+      'Next month's file adds only the new starters. Children who have left simply stop appearing in the export; they are not removed from the CRM, because a record of a child who used to attend is worth keeping.',
       'The Active Enrolment Report is a roster: First Name, Last Name, Date of Birth, Classroom, Enroll Date, and no parents at all. That is fine — the children come in, each family is named from the child, and you add guardians afterwards from the family page. The import warns you about every family with no contact details so none are forgotten.',
       'After importing a roster, open Ages & Rooms. It will show every child as needing a room, with the room their age fits, so you can place them all from one screen.',
       'Lillio also has an Enrolment Report and billing reports, which export the same way.',

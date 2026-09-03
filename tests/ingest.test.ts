@@ -2918,3 +2918,72 @@ describe("Lillio's own export, as the centre actually has it", () => {
     assert.equal(ghosts?.n, 0);
   });
 });
+
+describe('importing the same roster every month', () => {
+  // The requirement that makes Lillio usable at all: the export is a FULL roll
+  // every time, so next month's file contains everybody in this month's. If a
+  // re-import duplicated, the CRM would be unusable by the second month.
+  const H = ['First Name', 'Last Name', 'Date of Birth', 'Classroom', 'Enroll Date'];
+  const A = actorFor({ id: 'roster' });
+  const rows = [
+    ['Wren', 'Ashby', '2024-02-14', 'Comet Stars', '2026-05-01'],
+    ['Idris', 'Ashby', '2022-06-30', 'Nova Stars', '2026-05-01'],
+  ];
+  const tab = (r: string[][]) => ({ headers: H, rows: r, truncated: false });
+  const map = () => guessMapping(H);
+  const kids = () => Number(one<{ n: number }>(
+    "SELECT COUNT(*) n FROM children WHERE last_name = 'Ashby'")?.n ?? 0);
+
+  test('the first import creates them', () => {
+    const r = commitImport(tab(rows), map(), A, 'Lillio September');
+    assert.equal(r.created, 2);
+    assert.equal(kids(), 2);
+  });
+
+  test('the same file again creates nothing, and the preview says so first', () => {
+    const view = previewImport(tab(rows), map());
+    assert.equal(view.willCreate, 0, 'a person must be told before they press the button');
+    assert.equal(view.willUpdate, 2);
+
+    const r = commitImport(tab(rows), map(), A, 'Lillio October');
+    assert.equal(r.created, 0);
+    assert.equal(kids(), 2, 'importing the same roll twice must not double the nursery');
+  });
+
+  test('next month adds only the new starter', () => {
+    const next = [...rows, ['Sunniva', 'Ashby', '2025-01-09', 'Twinkle Stars', '2026-10-01']];
+    const view = previewImport(tab(next), map());
+    assert.equal(view.willCreate, 1);
+    assert.equal(view.willUpdate, 2);
+
+    commitImport(tab(next), map(), A, 'Lillio November');
+    assert.equal(kids(), 3);
+  });
+
+  test('the same child twice inside one file is one child', () => {
+    const doubled = [
+      ['Bram', 'Ashby', '2023-08-08', 'Comet Stars', '2026-05-01'],
+      ['Bram', 'Ashby', '2023-08-08', 'Comet Stars', '2026-05-01'],
+    ];
+    commitImport(tab(doubled), map(), A, 'Pasted twice');
+    assert.equal(Number(one<{ n: number }>(
+      "SELECT COUNT(*) n FROM children WHERE first_name = 'Bram'")?.n ?? 0), 1);
+  });
+
+  test('siblings share a surname and a roll, and stay two children', () => {
+    // The whole reason the date of birth is part of the identity.
+    assert.equal(Number(one<{ n: number }>(
+      `SELECT COUNT(*) n FROM children
+        WHERE last_name = 'Ashby' AND first_name IN ('Wren','Idris')`)?.n ?? 0), 2);
+  });
+
+  test('a later export cannot blank a birthday somebody corrected by hand', () => {
+    const noDob = [['Wren', 'Ashby', '', 'Comet Stars', '2026-05-01']];
+    commitImport(tab(noDob), map(), A, 'Partial export');
+    // That row has no date of birth, so it cannot match on identity and will
+    // create a separate record — but the ORIGINAL Wren keeps her birthday.
+    const kept = one<{ date_of_birth: string | null }>(
+      "SELECT date_of_birth FROM children WHERE first_name = 'Wren' AND date_of_birth IS NOT NULL");
+    assert.equal(kept?.date_of_birth, '2024-02-14');
+  });
+});

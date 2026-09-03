@@ -358,9 +358,40 @@ function resolveRows(
       } else seenInFile.set(key, rowNumber);
     }
 
+    /**
+     * A child with a date of birth is the strongest identity on a roster row.
+     *
+     * This is what makes re-importing safe. Lillio's export is a full roll
+     * every time — next month's file contains everybody in this month's — and
+     * the guardian match below cannot help, because a roster has no guardian
+     * to match on. Without this, importing the same export twice would create
+     * 134 children again, and then again.
+     *
+     * First name, surname and date of birth together are specific enough:
+     * two children in one nursery sharing all three is vanishingly unlikely,
+     * and if it happened they would need telling apart by hand anyway.
+     */
+    if (r.action !== 'skip' && r.joinsRow === null && r.childFirstName && r.childDob) {
+      const sameChild = one<{ family_id: string }>(
+        `SELECT family_id FROM children
+          WHERE LOWER(first_name) = ? AND date_of_birth = ?
+            AND LOWER(COALESCE(last_name, '')) = ?
+          LIMIT 1`,
+        r.childFirstName.toLowerCase(), r.childDob,
+        (r.childLastName ?? '').toLowerCase());
+      if (sameChild) {
+        r.action = 'update';
+        r.existingFamilyId = sameChild.family_id;
+        issues.push({
+          row: rowNumber, field: 'childFirstName', severity: 'warning',
+          message: 'Already in the CRM — this row updates them rather than adding a second copy.',
+        });
+      }
+    }
+
     // Duplicates against what is ALREADY in the CRM. Skipped when an earlier
     // row in this file already decided where this one goes.
-    if (r.action !== 'skip' && r.joinsRow === null) {
+    if (r.action !== 'skip' && r.joinsRow === null && !r.existingFamilyId) {
       const matches = findFamilyMatches({
         fullName: guardianName,
         email: r.guardianEmail ?? undefined,
@@ -437,6 +468,12 @@ export function commitImport(
     const p2 = normPhone(r.guardianPhone);
     if (e) keys.push('e:' + e);
     if (p2) keys.push('p:' + p2);
+    // The same child twice inside one file — a roster exported mid-edit, or a
+    // sheet somebody pasted onto itself — joins the same family rather than
+    // creating two. Same identity as the check against the database above.
+    if (r.childFirstName && r.childDob) {
+      keys.push(`c:${r.childFirstName.toLowerCase()}|${(r.childLastName ?? '').toLowerCase()}|${r.childDob}`);
+    }
     return keys;
   };
 
@@ -497,6 +534,21 @@ export function commitImport(
         const dupChild = one<{ id: string }>(
           'SELECT id FROM children WHERE family_id = ? AND LOWER(first_name) = ? LIMIT 1',
           familyId, r.childFirstName.toLowerCase());
+        if (dupChild) {
+          // Already here, so fill in anything the earlier import did not have.
+          // COALESCE and not assignment: a later export must not blank a
+          // birthday somebody corrected by hand in the CRM.
+          run(
+            `UPDATE children SET
+               last_name = COALESCE(last_name, ?),
+               date_of_birth = COALESCE(date_of_birth, ?),
+               age_band = COALESCE(age_band, ?),
+               updated_at = ?
+             WHERE id = ?`,
+            r.childLastName, r.childDob,
+            r.childAgeBand ?? ageBandFor(r.childDob), now, dupChild.id,
+          );
+        }
         if (!dupChild) {
           run(
             `INSERT INTO children (id, family_id, first_name, last_name, date_of_birth, age_band, status, created_at, updated_at)
