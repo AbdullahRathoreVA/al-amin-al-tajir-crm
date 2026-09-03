@@ -10,6 +10,7 @@ import { channelStatus, SYNC_CHANNELS } from './sync.ts';
 import { dayBounds, nowIso, plainAll } from './util.ts';
 import { newestBackup } from './backup.ts';
 import { outgrown } from './progression.ts';
+import { provider as aiProvider } from './ai.ts';
 
 const count = (sql: string, ...p: (string | number | null)[]): number =>
   Number(one<{ n: number }>(sql, ...p)?.n ?? 0);
@@ -327,7 +328,19 @@ export function systemHealth(): SystemCheck[] {
       ? `Connected. ${sheets.sent} row(s) sent, ${sheets.pending} queued`
       : String(sheets.notConnectedReason ?? 'Not connected'),
   });
-  checks.push({ id: 'ai', label: 'AI assistant', state: 'unknown', detail: 'Not configured (Phase 4)' });
+  // Hard-coded to "Phase 4" long after the AI layer shipped, so the one screen
+  // whose whole promise is "real states only" was reporting a stale one. It is
+  // read from the actual provider now. Deliberately not the network check:
+  // systemHealth() is synchronous, and "is it configured" is the question a
+  // person is asking here anyway.
+  const ai = aiProvider();
+  checks.push({
+    id: 'ai', label: 'AI assistant',
+    state: ai ? 'good' : 'unknown',
+    detail: ai
+      ? `Using ${ai.name}. Summaries and briefings only — it can never send to a parent.`
+      : 'Off. Everything works without it; set CRM_AI_PROVIDER to switch it on.',
+  });
   const backup = newestBackup();
   checks.push({
     id: 'backup', label: 'Backup',

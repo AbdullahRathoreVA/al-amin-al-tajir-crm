@@ -203,7 +203,9 @@ function Shell({ me, onSignedOut }: { me: Me; onSignedOut: () => void }) {
             style={{ borderColor: 'var(--line)', background: 'var(--surface-sunken)', color: 'var(--text-faint)' }}
           >
             <span aria-hidden>&#9906;</span>
-            <span className="flex-1">Search families, children, tours&hellip;</span>
+            {/* Truncate rather than wrap: at 375px this placeholder ran to four
+                lines and pushed the whole header down the screen. */}
+            <span className="min-w-0 flex-1 truncate">Search families, children, tours&hellip;</span>
             <kbd className="hidden rounded px-1.5 py-0.5 text-[10px] sm:inline"
                  style={{ background: 'var(--surface-inset)' }}>Ctrl K</kbd>
           </button>
