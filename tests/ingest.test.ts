@@ -2986,4 +2986,15 @@ describe('importing the same roster every month', () => {
       "SELECT date_of_birth FROM children WHERE first_name = 'Wren' AND date_of_birth IS NOT NULL");
     assert.equal(kept?.date_of_birth, '2024-02-14');
   });
+
+  test('an imported child is findable by their own name straight away', () => {
+    // The family row already carried the child's first name in its body, so a
+    // search found the FAMILY. The child's own record stayed invisible until
+    // somebody rebuilt the whole index — which on a roster import is every
+    // record in the file.
+    const hit = search('Sunniva').find((h) => h.entity_type === 'child');
+    assert.ok(hit, 'a child imported from a roster should be searchable immediately');
+    assert.ok(hit.family_id, 'and the result has to open somewhere');
+  });
 });
+

@@ -11,7 +11,7 @@
  * validate, then commit. Nothing is written until a person has seen the counts.
  * (spec 45 / 47 / 48)
  */
-import { one, run, tx } from '../db/index.ts';
+import { one, many, run, tx } from '../db/index.ts';
 import { newId, nowIso, normEmail, normPhone, splitName, familyNameFrom } from './util.ts';
 import { recordEvent, type Actor } from './events.ts';
 import { findFamilyMatches } from './match.ts';
@@ -581,6 +581,17 @@ export function commitImport(
       indexEntity('family', familyId, label,
         [r.guardianName, r.guardianEmail, r.guardianPhone, r.childFirstName].filter(Boolean).join(' '),
         familyId);
+
+      // The children too, individually. The family row above carries the
+      // child's first name in its body, so a search would find the family —
+      // but the child's own record stayed invisible until somebody happened to
+      // rebuild the whole index, and on a roster import that is every record
+      // in the file.
+      for (const c of many<{ id: string; first_name: string; last_name: string | null; age_band: string | null; status: string }>(
+        'SELECT id, first_name, last_name, age_band, status FROM children WHERE family_id = ?', familyId)) {
+        indexEntity('child', c.id, [c.first_name, c.last_name].filter(Boolean).join(' '),
+          [c.age_band, c.status].filter(Boolean).join(' '), familyId);
+      }
     }
 
     run(`INSERT INTO settings (key, value_json, updated_at) VALUES (?,?,?)
