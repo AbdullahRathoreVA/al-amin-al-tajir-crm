@@ -20,6 +20,7 @@ import { one, many, run } from '../db/index.ts';
 import { nowIso, plainAll } from './util.ts';
 import { recordEvent, type Actor } from './events.ts';
 import { ageBandFor, monthsBetween, reindexChild } from './people.ts';
+import { sweep as sweepWaitlist } from './waitlist.ts';
 
 const SYSTEM: Actor = { type: 'system', id: null, source: 'schedule' };
 
@@ -290,6 +291,11 @@ export function startAgeSchedule(intervalHours = 24): void {
       const { bands, outgrown: n } = runDailyAgeSweep();
       if (bands > 0) console.log(`[crm] ages     ${bands} child age group(s) updated`);
       if (n > 0) console.log(`[crm] ages      ${n} child(ren) have outgrown their room`);
+      // The waiting list rots by silence, not by disorder, so it is swept on
+      // the same schedule: expired offers chased, quiet families checked on.
+      const w = sweepWaitlist(SYSTEM);
+      if (w.expired > 0) console.log(`[crm] waitlist ${w.expired} offer(s) past their deadline`);
+      if (w.stale > 0) console.log(`[crm] waitlist ${w.stale} famil(ies) not heard from in 3 months`);
     } catch (err) {
       console.error('[crm] age sweep failed:', err instanceof Error ? err.message : err);
     }

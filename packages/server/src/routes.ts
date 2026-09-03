@@ -9,6 +9,9 @@ import { config } from './core/config.ts';
 import { newId, nowIso, plain, plainAll, safeJson, familyNameFrom } from './core/util.ts';
 import { findFamilyMatches } from './core/match.ts';
 import { progressionSummary, placementPlan } from './core/progression.ts';
+import { list as wlList, join as wlJoin, offer as wlOffer, accept as wlAccept,
+         decline as wlDecline, recordContact as wlContact, programStanding,
+         WaitlistError, STALE_AFTER_DAYS, DEFAULT_OFFER_DAYS } from './core/waitlist.ts';
 import { familiesWorkbook, admissionsWorkbook, exportCounts } from './core/exports.ts';
 import { HELP, HELP_SECTIONS, searchHelp, topicsAsContext } from './core/help.ts';
 import {
@@ -1415,6 +1418,89 @@ router.patch('/api/v1/users/:id', (c) => {
     throw err;
   }
   return plain(one('SELECT id,email,name,role,status,created_at,last_login_at FROM users WHERE id = ?', id));
+});
+
+// ---------------------------------------------------------------- waitlist
+//
+// Position is computed, never stored, and there is deliberately no estimated
+// wait: the CRM cannot know when a place will free up, and a guess shown to
+// staff becomes a promise made to a parent.
+
+router.get('/api/v1/waitlist', (c) => {
+  c.require('registration:read');
+  return {
+    entries: wlList({
+      programId: c.query.get('programId') ?? undefined,
+      status: c.query.get('status') ?? undefined,
+    }),
+    programs: programStanding(),
+    staleAfterDays: STALE_AFTER_DAYS,
+    defaultOfferDays: DEFAULT_OFFER_DAYS,
+  };
+});
+
+router.post('/api/v1/waitlist', (c) => {
+  c.require('registration:write');
+  const b = requireBody<{
+    familyId?: string; childId?: string; programId?: string;
+    desiredStart?: string; careType?: 'full-time' | 'part-time'; notes?: string;
+  }>(c);
+  if (!b.familyId) throw badRequest('Which family is waiting?');
+  try {
+    return wlJoin({
+      familyId: b.familyId,
+      childId: b.childId || null,
+      programId: b.programId || null,
+      desiredStart: b.desiredStart || null,
+      careType: b.careType || null,
+      notes: b.notes || null,
+    }, actorOf(c));
+  } catch (err) {
+    if (err instanceof WaitlistError) throw badRequest(err.message);
+    throw err;
+  }
+});
+
+router.post('/api/v1/waitlist/:id/offer', (c) => {
+  c.require('registration:write');
+  const b = requireBody<{ expiresInDays?: number }>(c);
+  try {
+    return wlOffer(c.params.id!, actorOf(c), c.user!.id,
+      b.expiresInDays ?? DEFAULT_OFFER_DAYS);
+  } catch (err) {
+    if (err instanceof WaitlistError) throw badRequest(err.message);
+    throw err;
+  }
+});
+
+router.post('/api/v1/waitlist/:id/accept', (c) => {
+  c.require('registration:write');
+  const b = requireBody<{ reason?: string }>(c);
+  try { return wlAccept(c.params.id!, actorOf(c), b.reason); }
+  catch (err) {
+    if (err instanceof WaitlistError) throw badRequest(err.message);
+    throw err;
+  }
+});
+
+router.post('/api/v1/waitlist/:id/decline', (c) => {
+  c.require('registration:write');
+  const b = requireBody<{ reason?: string; keepWaiting?: boolean }>(c);
+  try { return wlDecline(c.params.id!, b.reason ?? '', actorOf(c), b.keepWaiting === true); }
+  catch (err) {
+    if (err instanceof WaitlistError) throw badRequest(err.message);
+    throw err;
+  }
+});
+
+router.post('/api/v1/waitlist/:id/contact', (c) => {
+  c.require('registration:write');
+  const b = requireBody<{ note?: string }>(c);
+  try { wlContact(c.params.id!, actorOf(c), b.note); return { ok: true }; }
+  catch (err) {
+    if (err instanceof WaitlistError) throw badRequest(err.message);
+    throw err;
+  }
 });
 
 router.get('/api/v1/progression', (c) => {

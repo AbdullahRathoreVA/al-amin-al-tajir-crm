@@ -10,6 +10,7 @@ import { channelStatus, SYNC_CHANNELS } from './sync.ts';
 import { dayBounds, nowIso, plainAll } from './util.ts';
 import { newestBackup } from './backup.ts';
 import { outgrown } from './progression.ts';
+import { attentionCounts as waitlistAttention } from './waitlist.ts';
 import { provider as aiProvider } from './ai.ts';
 
 const count = (sql: string, ...p: (string | number | null)[]): number =>
@@ -94,6 +95,22 @@ export function attention(): AttentionItem[] {
     count: count(`SELECT COUNT(*) n FROM tasks WHERE status IN ('open','doing') AND due_at < ?`, now),
     link: '/tasks?filter=overdue',
     detail: 'Assigned work past its due date',
+  });
+  // A place offered and not answered is a place nobody else can be given.
+  const wl = waitlistAttention();
+  push({
+    id: 'waitlist-offers-expired', severity: 'critical',
+    label: 'offered places past the deadline',
+    count: wl.expiredOffers,
+    link: '/waitlist',
+    detail: 'A family has not answered, and the place cannot go to anybody else',
+  });
+  push({
+    id: 'waitlist-stale', severity: 'warning',
+    label: 'waiting families not heard from',
+    count: wl.staleWaiting,
+    link: '/waitlist',
+    detail: 'Three months of silence is how a waiting list quietly empties',
   });
   push({
     id: 'registrations-incomplete', severity: 'warning',

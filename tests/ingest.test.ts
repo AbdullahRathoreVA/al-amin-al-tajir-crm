@@ -43,6 +43,8 @@ const { readXlsx, readSheet, looksLikeXlsx, fromExcelSerial } =
 const { parseTabular } = await import('../packages/server/src/core/csv.ts');
 const { refreshAgeBands, outgrown, upcomingBirthdays, progressionSummary, placementPlan } =
   await import('../packages/server/src/core/progression.ts');
+const { list: wlList, join: wlJoin, offer: wlOffer, accept: wlAccept, decline: wlDecline,
+        sweep: wlSweep, programStanding } = await import('../packages/server/src/core/waitlist.ts');
 const { familiesWorkbook, admissionsWorkbook, deFormula, exportCounts } =
   await import('../packages/server/src/core/exports.ts');
 const { HELP, HELP_SECTIONS, searchHelp, topicsAsContext } =
@@ -3169,5 +3171,118 @@ describe("the centre's licensed age ranges", () => {
     assert.ok(row);
     assert.equal(row.shouldBeProgram, 'Galaxy Stars');
     assert.ok(row.shouldBeRoomId, 'the room exists even though it has no capacity of its own');
+  });
+});
+
+describe('the waiting list', () => {
+  const A = actorFor({ id: 'wl' });
+  const prog = (slug: string) =>
+    one<{ id: string }>('SELECT id FROM programs WHERE slug = ?', slug)!.id;
+
+  // Created inside the first test, not in the describe body: the body runs
+  // while tests are being collected, before the database is connected.
+  let famA = '';
+  let famB = '';
+
+  test('position is computed per programme, in the order they joined', () => {
+    famA = insertFamily('Waitlist A family', 'manual', null, A);
+    famB = insertFamily('Waitlist B family', 'manual', null, A);
+    const p = prog('comet-stars');
+    wlJoin({ familyId: famA, programId: p }, A);
+    wlJoin({ familyId: famB, programId: p }, A);
+
+    const list = wlList({ programId: p });
+    assert.equal(list.length, 2);
+    assert.equal(list[0]?.position, 1);
+    assert.equal(list[1]?.position, 2);
+    assert.equal(list[0]?.familyName, 'Waitlist A family');
+  });
+
+  test('the same family cannot join the same list twice', () => {
+    // Joining twice is a mistake, not a stronger claim on a place.
+    assert.throws(() => wlJoin({ familyId: famA, programId: prog('comet-stars') }, A),
+      /already on this waiting list/);
+  });
+
+  test('an offer must carry a deadline, and the database refuses one without', () => {
+    const entry = wlList({ programId: prog('comet-stars') })[0]!;
+    wlOffer(entry.id, A, null, 14);
+    const row = one<{ status: string; offered_at: string | null; offer_expires_at: string | null }>(
+      'SELECT status, offered_at, offer_expires_at FROM waitlist WHERE id = ?', entry.id);
+    assert.equal(row?.status, 'offered');
+    assert.ok(row?.offered_at && row?.offer_expires_at,
+      'an offer with no deadline is how a place is held for a family who has gone elsewhere');
+
+    // Half an offer is refused by the trigger, not by a convention.
+    assert.throws(() => execSql(
+      'UPDATE waitlist SET offer_expires_at = NULL WHERE id = ?', entry.id),
+      /needs both the date it was made and the date it runs out/);
+  });
+
+  test('being offered a place takes you out of the queue positions', () => {
+    // Somebody holding an offer is not ahead of anybody any more.
+    const list = wlList({ programId: prog('comet-stars') });
+    const offered = list.find((e) => e.status === 'offered');
+    const waiting = list.find((e) => e.status === 'waiting');
+    assert.equal(offered?.position, 0);
+    assert.equal(waiting?.position, 1, 'the next family moves up to first');
+  });
+
+  test('a decline needs a reason, because it is the only thing anyone learns from', () => {
+    const entry = wlList({ status: 'offered' })[0]!;
+    assert.throws(() => wlDecline(entry.id, '   ', A), /Say why/);
+  });
+
+  test('turning an offer down can keep you on the list, in your place', () => {
+    const entry = wlList({ status: 'offered' })[0]!;
+    wlDecline(entry.id, 'Wanted September, this was June', A, true);
+    const row = one<{ status: string; offer_expires_at: string | null; outcome_reason: string }>(
+      'SELECT status, offer_expires_at, outcome_reason FROM waitlist WHERE id = ?', entry.id);
+    assert.equal(row?.status, 'waiting', 'declining one offer is not leaving the list');
+    assert.equal(row?.offer_expires_at, null, 'and the old deadline is cleared');
+    assert.match(String(row?.outcome_reason), /September/);
+  });
+
+  test('accepting enrols the child but does not choose their room', () => {
+    const fam = insertFamily('Waitlist C family', 'manual', null, A);
+    const kid = addChild(fam, { firstName: 'Wlkid' }, A);
+    const entry = wlJoin({ familyId: fam, childId: kid, programId: prog('nova-stars') }, A);
+    wlOffer(String(entry.id), A, null, 7);
+    wlAccept(String(entry.id), A);
+
+    const child = one<{ status: string; classroom_id: string | null }>(
+      'SELECT status, classroom_id FROM children WHERE id = ?', kid);
+    assert.equal(child?.status, 'enrolled');
+    assert.equal(child?.classroom_id, null,
+      'which room is a placement decision, and Ages & Rooms owns it');
+  });
+
+  test('the sweep chases expired offers and silent families', () => {
+    const fam = insertFamily('Waitlist D family', 'manual', null, A);
+    const entry = wlJoin({ familyId: fam, programId: prog('galaxy-stars') }, A);
+    wlOffer(String(entry.id), A, null, 1);
+    // Wind the deadline back past today.
+    execSql('UPDATE waitlist SET offer_expires_at = ? WHERE id = ?',
+      new Date(Date.now() - 86_400_000).toISOString(), String(entry.id));
+
+    const before = Number(one<{ n: number }>(
+      "SELECT COUNT(*) n FROM tasks WHERE title LIKE '%has not answered about their place%'")?.n ?? 0);
+    const r = wlSweep(A);
+    assert.ok(r.expired >= 1);
+    assert.ok(Number(one<{ n: number }>(
+      "SELECT COUNT(*) n FROM tasks WHERE title LIKE '%has not answered about their place%'")?.n ?? 0) > before,
+      'an expired offer must become somebody\'s job, not sit there');
+
+    // It reports, it does not withdraw. Taking a place back behind a family's
+    // back is not a thing software should do on a timer.
+    assert.equal(one<{ status: string }>(
+      'SELECT status FROM waitlist WHERE id = ?', String(entry.id))?.status, 'offered');
+  });
+
+  test('places free comes from the licensed capacity, not a guess', () => {
+    const standing = programStanding().find((p) => p.name === 'Comet Stars');
+    assert.ok(standing);
+    assert.equal(standing.capacity, 76, 'the licensed number, from the poster');
+    assert.equal(typeof standing.waiting, 'number');
   });
 });
