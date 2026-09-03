@@ -3120,11 +3120,14 @@ describe("the centre's licensed age ranges", () => {
       assert.equal(p.max_months, max, `${slug} ends at ${max} months`);
       assert.equal(p.capacity, cap, `${slug} is licensed for ${cap}`);
     };
-    check('twinkle-stars', 12, 19, 28);   // Infant
+    // Twinkle starts at 0: three under-12-month places are allowed, and those
+    // children are in the Twinkle rooms. 28 + 3.
+    check('twinkle-stars', 0, 19, 31);    // Infant
     check('comet-stars', 19, 36, 76);     // Toddler
-    check('nova-stars', 36, 48, 46);      // Pre-school 3-4
-    check('preschool-4-5', 48, 60, 54);   // Pre-school 4-5
-    check('galaxy-stars', 60, 72, 74);    // Kindergarten age
+    // Both pre-school ranges are in the Nova rooms. 46 + 54.
+    check('nova-stars', 36, 60, 100);     // Pre-school 3-5
+    // One room, one licensed range: Kindergarten age through Grade 6.
+    check('galaxy-stars', 60, 144, 74);   // Kindergarten age and OSC
   });
 
   test('the ladder has no hole in it', () => {
@@ -3142,8 +3145,10 @@ describe("the centre's licensed age ranges", () => {
   test('the licensed places add up to the poster total', () => {
     const total = Number(one<{ n: number }>(
       `SELECT SUM(capacity) n FROM programs WHERE active = 1 AND age_ladder = 1`)?.n ?? 0);
-    // 28 + 76 + 46 + 54 + 74. Out-of-school care shares the 74 and is null.
-    assert.equal(total, 278, "the poster's total is 278 places");
+    // 31 + 76 + 100 + 74. Out-of-school care shares the 74 and is null.
+    // The poster's own total is 278; the extra 3 are the under-12 places it
+    // does not list.
+    assert.equal(total, 281);
   });
 
   test('a room with no capacity of its own falls back to the licensed places', () => {

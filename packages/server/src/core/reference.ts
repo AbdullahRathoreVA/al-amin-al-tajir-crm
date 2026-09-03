@@ -60,17 +60,19 @@ export const PROGRAMS: [string, string, string, number | null, number | null, nu
   // Capacity is per licensed range because that is how the licence is written.
   // Rooms are left unmeasured rather than having 76 toddler places split three
   // ways by guesswork.
-  ['twinkle-stars', 'Twinkle Stars', '12-19 months', 12, 19, 1, 28],
+  // Starts at 0: the centre is allowed three under-12-month places and they
+  // are in the Twinkle rooms. 28 licensed infant places plus those 3.
+  ['twinkle-stars', 'Twinkle Stars', 'Under 12 months to 19 months', 0, 19, 1, 31],
   ['comet-stars', 'Comet Stars', '19-36 months', 19, 36, 1, 76],
-  ['nova-stars', 'Nova Stars', '3-4 years', 36, 48, 1, 46],
-  // No room in the enrolment export serves this range. The program exists so
-  // the ladder has no hole in it, and Ages & Rooms says plainly that the
-  // children who fit it have nowhere to go yet.
-  ['preschool-4-5', 'Pre-school (4-5)', '4-5 years', 48, 60, 1, 54],
-  ['galaxy-stars', 'Galaxy Stars', '5-6 years', 60, 72, 1, 74],
-  // The poster counts these places together with Kindergarten age, so the 74
-  // above covers both and this stays unmeasured rather than invented.
-  ['cosmic-stars', 'Cosmic Stars', 'Grades 1-6 (out of school care)', 72, 144, 1, null],
+  // Both pre-school ranges live in the Nova Stars rooms, so they are one rung
+  // here: the poster's 46 places for 3-4 plus 54 for 4-5.
+  ['nova-stars', 'Nova Stars', '3-5 years', 36, 60, 1, 100],
+  // The poster gives Kindergarten age and out-of-school care ONE line, and the
+  // roll agrees: five-year-olds and nine-year-olds share Galaxy Stars Map.
+  ['galaxy-stars', 'Galaxy Stars', '5-6 years, and Grades 1-6 out of school care', 60, 144, 1, 74],
+  // Still offered and still on the website, but not a rung: the children it
+  // describes are in the Galaxy Stars room, whose range now covers them.
+  ['cosmic-stars', 'Cosmic Stars', 'Grades 1-6 (out of school care)', 72, 144, 0, null],
   ['learning-adventures', 'Learning Adventures', 'Ages 2-5', 24, 60, 0, null],
 ];
 
