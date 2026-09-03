@@ -205,14 +205,19 @@ export function readXlsx(buf: Buffer): XlsxSheet[] {
   // sheet1.xml is not reliably the first tab.
   const rels = files.get('xl/_rels/workbook.xml.rels')?.toString('utf8') ?? '';
   const relTarget = new Map<string, string>();
-  for (const m of rels.matchAll(/<Relationship\b[^>]*\/>/g)) {
+  // Both spellings, for the same reason as <sheet> below.
+  for (const m of rels.matchAll(/<Relationship\b[^>]*?\/?>/g)) {
     const id = attr(m[0], 'Id');
     const target = attr(m[0], 'Target');
     if (id && target) relTarget.set(id, target.replace(/^\/?(xl\/)?/, ''));
   }
 
   const out: XlsxSheet[] = [];
-  for (const m of workbook.matchAll(/<sheet\b[^>]*\/>/g)) {
+  // `<sheet ... />` AND `<sheet ...></sheet>`. Excel writes the self-closing
+  // form, so only that was handled — and then Lillio's enrolment export, which
+  // writes the paired form, came back as "no readable sheets" on a file that
+  // was perfectly valid. Both are legal XML and both appear in the wild.
+  for (const m of workbook.matchAll(/<sheet\b[^>]*?\/?>/g)) {
     const name = attr(m[0], 'name') ?? `Sheet ${out.length + 1}`;
     const rid = attr(m[0], 'r:id') ?? attr(m[0], 'id');
     const path = rid ? relTarget.get(rid) : undefined;

@@ -630,12 +630,27 @@ describe('csv import', () => {
       'previewing must not write a single row');
   });
 
-  test('a row with no way to contact the family is skipped, with a reason', () => {
+  test('a named child with no contact details is imported, with a warning', () => {
+    // This used to be an error, and it cost 134 real children: Lillio's
+    // enrolment export is a roster with no parents in it at all. A roll of
+    // children who already attend is not an enquiry list, and refusing it
+    // guards against a problem the centre does not have. The gap is surfaced
+    // instead, and shows up in the data-quality view.
     const csv = HEAD + 'No Contact Person,,,Kid,\n';
     const p = parseCsv(csv);
     const view = previewImport(p, guessMapping(p.headers));
+    assert.equal(view.willSkip, 0);
+    assert.equal(view.willCreate, 1);
+    assert.ok(view.issues.some((i) => i.severity === 'warning' && /add a guardian/i.test(i.message)));
+  });
+
+  test('a row with neither a child nor a contact is still refused', () => {
+    // Nothing to record at all. This is the case the old rule was really for.
+    const csv = HEAD + 'Nobody Useful,,,,\n';
+    const p = parseCsv(csv);
+    const view = previewImport(p, guessMapping(p.headers));
     assert.equal(view.willSkip, 1);
-    assert.ok(view.issues.some((i) => i.severity === 'error' && /never be contacted/.test(i.message)));
+    assert.ok(view.issues.some((i) => i.severity === 'error'));
   });
 
   test('an ambiguous date is left blank rather than guessed', () => {
@@ -2853,5 +2868,53 @@ describe('where every child should go', () => {
     const row = placementPlan().find((r) => r.childId === cid);
     assert.ok(row, '"everyone is fine" is only believable if the fine ones are shown');
     assert.equal(row.verdict, 'correct');
+  });
+});
+
+describe("Lillio's own export, as the centre actually has it", () => {
+  // Rebuilt from the real Tiny_Stars_Active_enrollment_Report.xlsx: a paired
+  // <sheet></sheet> element, no sharedStrings, inline strings, and a roster
+  // with no parents in it.
+  const HEADERS = ['First Name', 'Last Name', 'Date of Birth', 'Classroom',
+                   'Enroll Date', 'Grad Date', 'Rotation', 'Schedule'];
+
+  test('every column the report carries is recognised', () => {
+    const m = guessMapping(HEADERS);
+    assert.equal(m.childFirstName, 0);
+    assert.equal(m.childLastName, 1);
+    assert.equal(m.childDob, 2);
+    assert.equal(m.program, 3);
+    assert.equal(m.desiredStart, 4, '"Enroll Date" should map, not be left over');
+  });
+
+  test('a roster with no parents imports rather than being refused wholesale', () => {
+    const rows = [
+      ['Quinn', 'Abel', '2025-05-18', 'Blue Twinkle Stars', '2026-05-01', '', 'Day', 'MTWRF'],
+      ['Oslo', 'Buick', '2025-08-23', 'Blue Twinkle Stars', '2026-09-01', '', 'Day', 'MTWRF'],
+    ];
+    const tab = { headers: HEADERS, rows, truncated: false };
+    const view = previewImport(tab, guessMapping(HEADERS));
+    assert.equal(view.willCreate, 2);
+    assert.equal(view.willSkip, 0);
+    assert.equal(view.issues.filter((i) => i.severity === 'error').length, 0);
+
+    const res = commitImport(tab, guessMapping(HEADERS), actorFor({ id: 'imp' }), 'Lillio');
+    assert.equal(res.created, 2);
+
+    // Named from the child, because there is no parent to name it after.
+    const fam = one<{ name: string }>("SELECT name FROM families WHERE name LIKE '%Abel%'");
+    assert.ok(fam, 'a family should be created and named from the child');
+
+    // The birthday survives as a real date, and the age group is derived from
+    // it at import rather than staying blank until the nightly sweep.
+    const child = one<{ date_of_birth: string; age_band: string | null }>(
+      "SELECT date_of_birth, age_band FROM children WHERE first_name = 'Quinn'");
+    assert.equal(child?.date_of_birth, '2025-05-18');
+    assert.ok(child?.age_band, 'an imported roll should be usable immediately');
+
+    // And no empty nameless guardian rows left behind.
+    const ghosts = one<{ n: number }>(
+      "SELECT COUNT(*) n FROM guardians WHERE first_name IS NULL OR first_name = ''");
+    assert.equal(ghosts?.n, 0);
   });
 });

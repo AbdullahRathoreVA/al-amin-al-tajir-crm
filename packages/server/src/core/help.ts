@@ -467,7 +467,7 @@ export const HELP: HelpTopic[] = [
     ],
     steps: [
       'In Lillio, open Reports.',
-      'Choose the Child Profile Report.',
+      'Choose the Child Profile Report, or the Active Enrolment Report if you just want who is attending now.',
       'Pick the centre, the classroom and the child status you want.',
       'Click Run Export and save the CSV it gives you.',
       'In this CRM open Import, choose that file, check the columns it matched, and press Check the file.',
@@ -476,6 +476,8 @@ export const HELP: HelpTopic[] = [
     ],
     notes: [
       'Do this again whenever you want to catch up. Families already here are matched rather than duplicated, so re-importing the same export does not double anybody.',
+      'The Active Enrolment Report is a roster: First Name, Last Name, Date of Birth, Classroom, Enroll Date, and no parents at all. That is fine — the children come in, each family is named from the child, and you add guardians afterwards from the family page. The import warns you about every family with no contact details so none are forgotten.',
+      'After importing a roster, open Ages & Rooms. It will show every child as needing a room, with the room their age fits, so you can place them all from one screen.',
       'Lillio also has an Enrolment Report and billing reports, which export the same way.',
       'If a live connection matters, ask Lillio directly whether your account can have API access. Until somebody says yes, nothing here will pretend to have it.',
       'The centre\'s waitlist page on the website still sends parents to Lillio. Do not switch that off before deciding what replaces it — families are part-way through applications in it.',

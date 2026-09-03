@@ -16,6 +16,7 @@ import { newId, nowIso, normEmail, normPhone, splitName, familyNameFrom } from '
 import { recordEvent, type Actor } from './events.ts';
 import { findFamilyMatches } from './match.ts';
 import { indexEntity } from './search.ts';
+import { ageBandFor } from './people.ts';
 import { AGE_BANDS, isEmailish, isPhoneish } from '../../../shared/src/contract.ts';
 import { readXlsx, looksLikeXlsx } from './xlsx-read.ts';
 
@@ -172,7 +173,7 @@ const ALIASES: Record<ImportField, string[]> = {
   program: ['program', 'programme', 'room', 'class', 'classroom', 'programinterest',
     'group', 'currentroom', 'enrolledroom', 'classroomname'],
   desiredStart: ['startdate', 'desiredstart', 'start', 'preferredstart', 'enrolmentdate', 'enrollmentdate',
-    'enrollmentstartdate', 'startingdate', 'admissiondate'],
+    'enrollmentstartdate', 'startingdate', 'admissiondate', 'enrolldate', 'enroldate'],
   notes: ['notes', 'note', 'comments', 'comment', 'questions', 'message'],
   status: ['status', 'stage', 'leadstatus', 'childstatus', 'enrollmentstatus', 'studentstatus'],
 };
@@ -290,9 +291,23 @@ function resolveRows(
       action: 'create', existingFamilyId: null, joinsRow: null,
     };
 
-    if (!guardianName) {
-      issues.push({ row: rowNumber, field: 'guardianName', severity: 'error', message: 'No parent name in this row.' });
+    // A roster is not a contact list.
+    //
+    // Lillio's Active Enrolment Report — the file a centre actually has — is
+    // First Name, Last Name, Date of Birth, Classroom, Enroll Date. No parents
+    // at all. Requiring a guardian rejected all 134 rows of a real export,
+    // which is the wrong answer: a centre importing its roll wants the children
+    // in, and adds the parents afterwards.
+    //
+    // So a row needs a guardian OR a child. Only a row with neither is skipped,
+    // because that row is genuinely nothing.
+    if (!guardianName && !r.childFirstName) {
+      issues.push({ row: rowNumber, field: 'guardianName', severity: 'error',
+        message: 'This row has neither a parent name nor a child name.' });
       r.action = 'skip';
+    } else if (!guardianName) {
+      issues.push({ row: rowNumber, field: 'guardianName', severity: 'warning',
+        message: 'No parent on this row. The family is named from the child, and a guardian can be added later.' });
     }
     if (rawEmail) {
       if (isEmailish(rawEmail)) r.guardianEmail = rawEmail.toLowerCase();
@@ -303,8 +318,20 @@ function resolveRows(
       else issues.push({ row: rowNumber, field: 'guardianPhone', severity: 'warning', message: `"${rawPhone}" is not a valid phone number. Left blank.` });
     }
     if (!r.guardianEmail && !r.guardianPhone && r.action !== 'skip') {
-      issues.push({ row: rowNumber, field: 'contact', severity: 'error', message: 'No email and no phone, so this family could never be contacted.' });
-      r.action = 'skip';
+      // An enquiry with no way to reach it is not a lead, and that is still
+      // true. But a roster of children who already attend is a different thing
+      // entirely: Lillio's enrolment export carries no contact details at all,
+      // and refusing it loses 134 real children to protect against a problem
+      // the centre does not have. A named child is enough; the missing contact
+      // becomes a warning and shows up in the data-quality view.
+      const severity = r.childFirstName ? 'warning' : 'error';
+      issues.push({
+        row: rowNumber, field: 'contact', severity,
+        message: r.childFirstName
+          ? 'No email or phone for this family yet. The child is imported; add a guardian to be able to contact them.'
+          : 'No email and no phone, so this family could never be contacted.',
+      });
+      if (severity === 'error') r.action = 'skip';
     }
 
     const band = cell(row, mapping.childAgeBand);
@@ -429,7 +456,11 @@ export function commitImport(
         run(
           `INSERT INTO families (id, name, status, source, source_id, created_at, updated_at, created_by, updated_by)
            VALUES (?,?,'prospective','excel',?,?,?,?,?)`,
-          familyId, familyNameFrom(r.guardianName), batchId, now, now, actor.id, actor.id,
+          // With no parent on the row, the child's surname names the family —
+          // "Abel family" — which is what staff would write anyway.
+          familyId,
+          familyNameFrom(r.guardianName || [r.childFirstName, r.childLastName].filter(Boolean).join(' ')),
+          batchId, now, now, actor.id, actor.id,
         );
         created++;
         for (const k of keys) createdThisBatch.set(k, familyId);
@@ -447,7 +478,10 @@ export function commitImport(
             familyId, email, phone)
         : undefined;
 
-      if (!existingGuardian) {
+      // No parent on the row means no guardian row. An empty one would be a
+      // nameless contact nobody can use, cluttering the family page and the
+      // "no contact details" warnings for ever.
+      if (!existingGuardian && r.guardianName) {
         const { first, last } = splitName(r.guardianName);
         run(
           `INSERT INTO guardians (id, family_id, first_name, last_name, relationship, email, phone,
@@ -467,7 +501,11 @@ export function commitImport(
           run(
             `INSERT INTO children (id, family_id, first_name, last_name, date_of_birth, age_band, status, created_at, updated_at)
              VALUES (?,?,?,?,?,?,'prospective',?,?)`,
-            newId(), familyId, r.childFirstName, r.childLastName, r.childDob, r.childAgeBand, now, now,
+            // Derive the band from the birthday when the file did not carry
+            // one, so an imported roll is usable immediately rather than
+            // blank until the nightly age sweep runs.
+            newId(), familyId, r.childFirstName, r.childLastName, r.childDob,
+            r.childAgeBand ?? ageBandFor(r.childDob), now, now,
           );
         }
       }
