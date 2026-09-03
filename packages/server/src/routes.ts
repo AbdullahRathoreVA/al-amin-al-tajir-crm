@@ -8,7 +8,7 @@ import { one, many, run, tx } from './db/index.ts';
 import { config } from './core/config.ts';
 import { newId, nowIso, plain, plainAll, safeJson, familyNameFrom } from './core/util.ts';
 import { findFamilyMatches } from './core/match.ts';
-import { progressionSummary } from './core/progression.ts';
+import { progressionSummary, placementPlan } from './core/progression.ts';
 import { familiesWorkbook, admissionsWorkbook, exportCounts } from './core/exports.ts';
 import { HELP, HELP_SECTIONS, searchHelp, topicsAsContext } from './core/help.ts';
 import {
@@ -51,6 +51,7 @@ import { ingest } from './ingest/pipeline.ts';
 import { parseUtterance, gapsIn, record as logRecord, update as logUpdate, list as logList,
          totals as logTotals, recall as logRecall, workbook as logWorkbook,
          remove as logRemove, restore as logRestore, removed as logRemoved,
+         splitUtterance,
          LogbookError, type LogKind, type LogDraft } from './core/logbook.ts';
 
 export const router = new Router();
@@ -1421,6 +1422,28 @@ router.get('/api/v1/progression', (c) => {
   return progressionSummary();
 });
 
+/**
+ * Every child and the room their age says they belong in — including the ones
+ * already in the right place, because "everyone is fine" is only believable if
+ * the ones who are fine are shown too.
+ */
+router.get('/api/v1/placement', (c) => {
+  c.require('classroom:read');
+  const rows = placementPlan();
+  const count = (v: string) => rows.filter((r) => r.verdict === v).length;
+  return {
+    rows: plainAll(rows as unknown as Record<string, unknown>[]),
+    summary: {
+      total: rows.length,
+      correct: count('correct'),
+      move: count('move'),
+      unplaced: count('unplaced'),
+      noRoomForAge: count('no-room-for-age'),
+      noBirthday: count('no-birthday'),
+    },
+  };
+});
+
 router.get('/api/v1/classrooms', (c) => {
   const user = c.require('classroom:read');
   return { classrooms: listClassrooms(user) };
@@ -1600,6 +1623,24 @@ function logbook<T>(work: () => T): T {
 }
 
 /** Reads a sentence and says what it understood, plus what it still needs. */
+/**
+ * One sentence, several purchases. The model decides only where one purchase
+ * ends and the next begins; the amounts and dates in what it returns are
+ * re-read by the same regexes used everywhere else, and nothing is written
+ * until a person presses save.
+ */
+router.post('/api/v1/logbook/ai-split', async (c) => {
+  c.require('logbook:write');
+  const b = requireBody<{ text?: string; today?: string }>(c);
+  const text = (b.text ?? '').trim().slice(0, 1000);
+  if (!text) throw badRequest('Say what you bought first');
+  // Same reason as /parse: the browser knows the local date, the server only
+  // knows UTC, and this is a ledger.
+  const today = b.today && /^\d{4}-\d{2}-\d{2}$/.test(b.today) ? b.today : nowIso().slice(0, 10);
+  const r = await splitUtterance(text, today, aiProvider());
+  return { ...r, drafts: r.drafts.map((d) => ({ draft: d, gaps: gapsIn(d) })), today };
+});
+
 router.post('/api/v1/logbook/parse', (c) => {
   c.require('logbook:write');
   const b = requireBody<{ text?: string; today?: string }>(c);

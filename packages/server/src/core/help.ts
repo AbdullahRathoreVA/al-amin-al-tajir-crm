@@ -295,6 +295,32 @@ export const HELP: HelpTopic[] = [
     keywords: ['age', 'birthday', 'move up', 'transition', 'graduate', 'grown', 'outgrown', 'next room'],
   },
   {
+    id: 'ages-and-rooms',
+    section: 'Every day',
+    title: 'Ages & Rooms: where every child should go',
+    summary: 'One screen listing every child and the room their age says they belong in.',
+    body: [
+      'Ages & Rooms is the screen to open when you have just brought a list of children in, or when you want to check nobody has been missed.',
+      'It shows every child, not only the ones with a problem, because "everyone is fine" is not believable unless the children who are fine are on the screen too.',
+      'Each child gets one of five verdicts: in the right room, should move, needs a room, no room for this age, or no birthday recorded. The filter at the top right narrows it to one of those.',
+      'Where a child should move, the button puts them in that room in one click. Nothing moves on its own — that depends on space, ratios, the educator they have settled with, and their parents.',
+    ],
+    steps: [
+      'Open Ages & Rooms from the left menu.',
+      'Look at the four numbers at the top: children, in the right room, should move, need a room.',
+      'Filter to "should move" or "needs a room" to see just the work.',
+      'Press the button beside a child to put them in the room that fits.',
+    ],
+    notes: [
+      'A child with no date of birth cannot be placed here, and the panel at the bottom says how many. Add the birthday on their family page and they appear.',
+      'A child outside every age range you have set is also listed. Either you do not run a room for that age, or a program is missing its range — set one on the Register under "Rooms and ratios".',
+      'Age groups themselves are recalculated from birthdays every day, so this stays right as children grow.',
+    ],
+    who: 'Anyone who can see rooms. Owner, director and admissions can move a child.',
+    related: ['moving-up-a-room', 'rooms-and-ratios', 'importing-a-spreadsheet', 'lillio'],
+    keywords: ['ages', 'rooms', 'placement', 'where', 'which room', 'move', 'assign', 'age group', 'transition', 'plan'],
+  },
+  {
     id: 'tasks-and-follow-ups',
     section: 'Every day',
     title: 'Tasks and follow-ups',
@@ -490,7 +516,15 @@ export const HELP: HelpTopic[] = [
       'You can speak instead of typing, using your browser\'s own speech recognition. There is no charge for it and the microphone only appears where it works.',
       'Entries can be corrected, and removed. A removed entry leaves the lists and the totals but the record of it stays, so a total can never quietly stop matching the receipts. You can put it back.',
     ],
+    steps: [
+      'Open Logbook.',
+      'Type or say what happened, in an ordinary sentence.',
+      'Answer anything it asks about, then save.',
+    ],
     notes: [
+      'Several purchases in one sentence: "I bought milk for $12 and nappies for $30 at Costco on September 2" becomes two entries. That split needs an AI provider switched on; without one it is read as a single entry. Either way nothing is saved until you have looked at it — the amounts and dates are always re-read by the rules, never taken from the AI.',
+      'If a sentence names money, it is recorded as a purchase even when there is no word like "bought" in it. "I put fuel in the car, $60" used to be filed as a note and left out of every total.',
+      'Amounts are understood with the currency on either side: "$50", "50 usd", "40 cad", "12 dollars".',
       'The reading is done by rules, not by AI. An amount and a date are exactly specified things, and a rule gets them right every time.',
       'Totals for a range with nothing in it say "not measured" rather than a confident zero.',
     ],

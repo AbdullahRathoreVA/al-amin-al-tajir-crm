@@ -54,7 +54,10 @@ export function parseMoney(text: string): number | null {
   const withSymbol = /(?:\$|\bcad\b|\busd\b)\s*([0-9][0-9,]*)(?:[.,]([0-9]{1,2}))?/i.exec(text);
   if (withSymbol) return toCents(withSymbol[1]!, withSymbol[2]);
 
-  const withWord = /([0-9][0-9,]*)(?:[.,]([0-9]{1,2}))?\s*(?:dollars?|bucks)\b/i.exec(text);
+  // The currency often comes after the number — "50 usd", "40 cad", "12
+  // dollars" — and without this "50 usd" fell through to the bare-decimal rule
+  // and could be read as a completely different number.
+  const withWord = /([0-9][0-9,]*)(?:[.,]([0-9]{1,2}))?\s*(?:dollars?|bucks|cad|usd)\b/i.exec(text);
   if (withWord) return toCents(withWord[1]!, withWord[2]);
 
   // A bare decimal reads as money: "84.32" in this context is not a count.
@@ -159,11 +162,20 @@ export function parseCategory(text: string): string | null {
   return null;
 }
 
-/** Purchase words, so the kind does not have to be picked from a menu. */
-export function parseKind(text: string): LogKind {
-  if (/\b(bought|buy|purchas|paid|spent|order(?:ed)?|invoice|receipt)\b/i.test(text)) return 'purchase';
+/**
+ * What kind of thing this was, so it does not have to be picked from a menu.
+ *
+ * The money rule at the end is the important one. "I put fuel in the car, $60"
+ * contains no purchase verb at all and was filed as a note — which then left
+ * it out of every total, silently. If a sentence names an amount of money and
+ * is not obviously a job that got done, somebody spent money.
+ */
+export function parseKind(text: string, hasAmount = false): LogKind {
+  if (/\b(bought|buy|purchas|paid|spent|spend|order(?:ed)?|invoice|receipt|topped up|filled up|refill(?:ed)?)\b/i.test(text)) return 'purchase';
   if (/\b(ran out|running low|need more|restock|out of|low on)\b/i.test(text)) return 'supply';
   if (/\b(fixed|cleaned|repaired|done|finished|completed|sorted|tidied)\b/i.test(text)) return 'task';
+  // "put fuel in the car, $60" — money named, no verb this knows.
+  if (hasAmount) return 'purchase';
   return 'note';
 }
 
@@ -177,11 +189,14 @@ export function parseKind(text: string): LogKind {
  */
 export function parseUtterance(text: string, today: string): LogDraft {
   const trimmed = text.trim();
+  // Read the amount first: whether money was named is itself evidence of what
+  // kind of entry this is.
+  const amountCents = parseMoney(trimmed);
   return {
-    kind: parseKind(trimmed),
+    kind: parseKind(trimmed, amountCents !== null),
     happenedOn: parseDay(trimmed, today) ?? undefined,
     vendor: parseVendor(trimmed) ?? undefined,
-    amountCents: parseMoney(trimmed),
+    amountCents,
     category: parseCategory(trimmed) ?? undefined,
     rawText: trimmed,
   };
@@ -513,4 +528,95 @@ export function removed(limit = 50): Record<string, unknown>[] {
        FROM logbook_entries e LEFT JOIN users u ON u.id = e.deleted_by
       WHERE e.deleted_at IS NOT NULL
       ORDER BY e.deleted_at DESC LIMIT ?`, limit));
+}
+
+// ---------------------------------------------------------- several at once
+
+/**
+ * "I bought milk for $12 and nappies for $30 at Costco on September 2."
+ *
+ * One sentence, several purchases. The rule-based parser reads exactly one
+ * entry out of a sentence and is right about it; splitting a sentence into
+ * three is genuinely a language problem, so this is where a model earns its
+ * place.
+ *
+ * What does NOT change: nothing is written. The model proposes drafts, the
+ * amounts and dates in those drafts are re-read by the SAME deterministic
+ * parsers used everywhere else, and a person presses save. An amount is
+ * exactly specified — a regex is right every time and a model is not — so the
+ * model is only trusted to decide where one purchase ends and the next begins.
+ */
+export interface SplitResult {
+  drafts: LogDraft[];
+  /** 'ai' when a model split it, 'rules' when it fell back to one entry. */
+  splitBy: 'ai' | 'rules';
+  note: string;
+}
+
+export async function splitUtterance(
+  text: string, today: string, ai: { name: string; complete(p: string, o?: { maxTokens?: number }): Promise<string | null> } | null,
+): Promise<SplitResult> {
+  const trimmed = text.trim();
+  const single = () => [parseUtterance(trimmed, today)];
+
+  if (!ai) {
+    return {
+      drafts: single(), splitBy: 'rules',
+      note: 'Read as one entry. Turn on an AI provider to split a sentence with several purchases in it.',
+    };
+  }
+
+  const prompt = [
+    'Split this into separate purchases. Reply with ONLY a JSON array, no prose.',
+    'Each item: {"summary": "what it was", "amount": "the amount exactly as written or null", "vendor": "shop or null", "date": "the date exactly as written or null"}',
+    'One item per thing bought. If it is a single purchase, return one item.',
+    'Copy amounts and dates verbatim from the sentence. Do not calculate, convert or invent anything.',
+    '',
+    `Sentence: ${trimmed}`,
+  ].join('\n');
+
+  const raw = await ai.complete(prompt, { maxTokens: 500 });
+  const parsed = parseJsonArray(raw);
+  if (!parsed.length) {
+    return {
+      drafts: single(), splitBy: 'rules',
+      note: 'The AI could not split that, so it was read as one entry.',
+    };
+  }
+
+  const drafts: LogDraft[] = parsed.slice(0, 20).map((item) => {
+    // Re-read the amount and date from the model's own words with the same
+    // regexes used everywhere else. The model chooses the split; the rules
+    // still decide what the numbers mean.
+    const piece = [item.summary, item.amount, item.vendor, item.date]
+      .filter((v): v is string => typeof v === 'string' && v.trim() !== '').join(' ');
+    const base = parseUtterance(piece, today);
+    return {
+      ...base,
+      kind: 'purchase',
+      summary: typeof item.summary === 'string' && item.summary.trim()
+        ? item.summary.trim().slice(0, 200) : base.summary,
+      // A date named once for the whole sentence applies to every line in it.
+      happenedOn: base.happenedOn ?? parseDay(trimmed, today) ?? undefined,
+      vendor: base.vendor ?? parseVendor(trimmed) ?? undefined,
+      rawText: trimmed,
+    };
+  });
+
+  return {
+    drafts, splitBy: 'ai',
+    note: `${ai.name} split this into ${drafts.length} entr${drafts.length === 1 ? 'y' : 'ies'}. Check each one — nothing is saved yet.`,
+  };
+}
+
+/** A model asked for JSON often wraps it in prose or a code fence. */
+function parseJsonArray(raw: string | null): Record<string, unknown>[] {
+  if (!raw) return [];
+  const start = raw.indexOf('[');
+  const end = raw.lastIndexOf(']');
+  if (start === -1 || end <= start) return [];
+  try {
+    const v = JSON.parse(raw.slice(start, end + 1));
+    return Array.isArray(v) ? v.filter((x) => x && typeof x === 'object') : [];
+  } catch { return []; }
 }

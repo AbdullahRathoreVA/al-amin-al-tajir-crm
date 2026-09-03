@@ -41,7 +41,7 @@ const { buildWorkbook } = await import('../packages/server/src/core/xlsx.ts');
 const { readXlsx, readSheet, looksLikeXlsx, fromExcelSerial } =
   await import('../packages/server/src/core/xlsx-read.ts');
 const { parseTabular } = await import('../packages/server/src/core/csv.ts');
-const { refreshAgeBands, outgrown, upcomingBirthdays, progressionSummary } =
+const { refreshAgeBands, outgrown, upcomingBirthdays, progressionSummary, placementPlan } =
   await import('../packages/server/src/core/progression.ts');
 const { familiesWorkbook, admissionsWorkbook, deFormula, exportCounts } =
   await import('../packages/server/src/core/exports.ts');
@@ -73,7 +73,7 @@ const actorFor = (u: { id: string }) => ({ type: 'user' as const, id: u.id, sour
 const { parseMoney, parseDay, parseVendor, parseCategory, parseUtterance, gapsIn,
         record: logRecord, update: logUpdate, recall: logRecall, totals: logTotals,
         workbook: logWorkbook, list: logList, remove: logRemove, restore: logRestore,
-        removed: logRemoved } = await import('../packages/server/src/core/logbook.ts');
+        removed: logRemoved, splitUtterance } = await import('../packages/server/src/core/logbook.ts');
 
 before(async () => {
   await connect();
@@ -2749,5 +2749,109 @@ describe('managing your own account', () => {
   test('the role list is read from the capability map, not typed out twice', () => {
     assert.deepEqual([...ROLE_NAMES].sort(),
       ['accounting', 'admissions', 'director', 'educator', 'owner', 'readonly']);
+  });
+});
+
+describe('the logbook reads money the way people write it', () => {
+  test('currency after the number, not only before', () => {
+    // "50 usd" fell through to the bare-decimal rule and read as a different
+    // number entirely. Found in real data on the live system.
+    assert.equal(parseMoney('i bought 50 usd milk from store'), 5000);
+    assert.equal(parseMoney('spent 40 cad on gas'), 4000);
+    assert.equal(parseMoney('12 dollars of glue'), 1200);
+    assert.equal(parseMoney('$84.32 at Costco'), 8432);
+  });
+
+  test('money named without a buying word is still a purchase', () => {
+    // "I put fuel in the car, $60" was filed as a note, which left it out of
+    // every total without saying so.
+    const d = parseUtterance('i put feul in car $60', '2026-09-03');
+    assert.equal(d.kind, 'purchase');
+    assert.equal(d.amountCents, 6000);
+  });
+
+  test('a quantity is still not money, and a job is still a job', () => {
+    assert.equal(parseUtterance('2 boxes of gloves', '2026-09-03').kind, 'note');
+    assert.equal(parseUtterance('fixed the gate', '2026-09-03').kind, 'task');
+    assert.equal(parseUtterance('ran out of wipes', '2026-09-03').kind, 'supply');
+  });
+
+  test('with no AI, one sentence is one entry and the rules still hold', async () => {
+    const r = await splitUtterance('i put feul in car $60', '2026-09-03', null);
+    assert.equal(r.splitBy, 'rules');
+    assert.equal(r.drafts.length, 1);
+    assert.equal(r.drafts[0]?.kind, 'purchase');
+    assert.equal(r.drafts[0]?.amountCents, 6000);
+  });
+
+  test('a model that returns nothing usable falls back rather than losing the entry', async () => {
+    const dud = { name: 'stub', complete: async () => 'I am afraid I cannot do that.' };
+    const r = await splitUtterance('bought milk $12', '2026-09-03', dud);
+    assert.equal(r.splitBy, 'rules');
+    assert.equal(r.drafts.length, 1);
+    assert.equal(r.drafts[0]?.amountCents, 1200);
+  });
+
+  test('the model splits, but the rules still decide what the numbers mean', async () => {
+    const ai = {
+      name: 'stub',
+      complete: async () => `[{"summary":"milk","amount":"$12","vendor":"Costco","date":"september 2 2026"},
+                             {"summary":"nappies","amount":"$30","vendor":"Costco","date":"september 2 2026"}]`,
+    };
+    const r = await splitUtterance(
+      'i bought milk for $12 and nappies for $30 at Costco on september 2 2026', '2026-09-03', ai);
+    assert.equal(r.splitBy, 'ai');
+    assert.equal(r.drafts.length, 2);
+    assert.equal(r.drafts[0]?.amountCents, 1200);
+    assert.equal(r.drafts[1]?.amountCents, 3000);
+    // The date was named once for the whole sentence and applies to both.
+    assert.equal(r.drafts[0]?.happenedOn, '2026-09-02');
+    assert.equal(r.drafts[1]?.happenedOn, '2026-09-02');
+    assert.equal(r.drafts[0]?.vendor, 'Costco');
+  });
+});
+
+describe('where every child should go', () => {
+  const STAFF = { type: 'user' as const, id: null, source: 'manual' };
+  const yearsAgo = (y: number) => {
+    const d = new Date(); d.setFullYear(d.getFullYear() - y);
+    return d.toISOString().slice(0, 10);
+  };
+
+  test('a child with no birthday is reported, never guessed at', () => {
+    const fid = insertFamily('Placement family', 'manual', null, STAFF);
+    const cid = addChild(fid, { firstName: 'NoDob' }, STAFF);
+    const row = placementPlan().find((r) => r.childId === cid);
+    assert.ok(row);
+    assert.equal(row.verdict, 'no-birthday');
+    assert.equal(row.shouldBeRoom, null, 'guessing a room for a child is exactly the wrong guess');
+  });
+
+  test('an unplaced child is told which room fits', () => {
+    const pid = one<{ id: string }>("SELECT id FROM programs WHERE slug='nova-stars'")!.id;
+    createClassroom('Placement Nova', { programId: pid, capacity: 10 }, STAFF);
+    const fid = insertFamily('Unplaced family', 'manual', null, STAFF);
+    const cid = addChild(fid, { firstName: 'Needsroom' }, STAFF);
+    execSql('UPDATE children SET date_of_birth = ?, status = ? WHERE id = ?',
+      yearsAgo(4), 'enrolled', cid);
+
+    const row = placementPlan().find((r) => r.childId === cid);
+    assert.ok(row);
+    assert.equal(row.verdict, 'unplaced');
+    assert.equal(row.shouldBeProgram, 'Nova Stars');
+    assert.ok(row.shouldBeRoomId);
+  });
+
+  test('a child already in the right room is shown as correct, not hidden', () => {
+    const pid = one<{ id: string }>("SELECT id FROM programs WHERE slug='nova-stars'")!.id;
+    const room = createClassroom('Placement Nova 2', { programId: pid, capacity: 10 }, STAFF);
+    const fid = insertFamily('Correct family', 'manual', null, STAFF);
+    const cid = addChild(fid, { firstName: 'Rightplace' }, STAFF);
+    execSql('UPDATE children SET date_of_birth = ?, status = ?, classroom_id = ? WHERE id = ?',
+      yearsAgo(4), 'enrolled', String(room.id), cid);
+
+    const row = placementPlan().find((r) => r.childId === cid);
+    assert.ok(row, '"everyone is fine" is only believable if the fine ones are shown');
+    assert.equal(row.verdict, 'correct');
   });
 });

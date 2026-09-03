@@ -14,6 +14,7 @@ import { Attendance } from './routes/Attendance.tsx';
 import { Logbook } from './routes/Logbook.tsx';
 import { Help } from './routes/Help.tsx';
 import { Account } from './routes/Account.tsx';
+import { AgesRooms } from './routes/AgesRooms.tsx';
 
 /**
  * `cap` hides an entry from roles that cannot use it. Only the register is
@@ -24,6 +25,7 @@ const NAV: { to: string; label: string; glyph: string; cap?: string }[] = [
   { to: '/', label: 'Dashboard', glyph: '◇' },
   { to: '/attendance', label: 'Register', glyph: '☑', cap: 'attendance:read' },
   { to: '/families', label: 'Families', glyph: '⌂' },
+  { to: '/ages', label: 'Ages & Rooms', glyph: '◳', cap: 'classroom:read' },
   { to: '/leads', label: 'Leads', glyph: '↗' },
   { to: '/tours', label: 'Tours', glyph: '◷' },
   { to: '/registrations', label: 'Registrations', glyph: '≡' },
@@ -335,6 +337,7 @@ function Routes({ me, onSignedOut }: { me: Me; onSignedOut: () => void }) {
   if (path === '/system' || path === '/programs') return <System />;
   if (path === '/help') return <Help />;
   if (path === '/account') return <Account me={me} onSignedOut={onSignedOut} />;
+  if (path === '/ages') return <AgesRooms canMove={me.capabilities.includes('child:write')} />;
   return (
     <Panel><div className="py-8 text-center">
       <p className="text-sm font-medium">This page does not exist.</p>
@@ -435,6 +438,8 @@ const ACTIONS = [
   { label: 'Possible duplicate families', to: '/families?filter=duplicates' },
   { label: 'System health', to: '/system' },
   { label: 'Help: how do I…', to: '/help' },
+  { label: 'Where should each child go?', to: '/ages' },
+  { label: 'Children who need a room', to: '/ages' },
   { label: 'Change my password', to: '/account' },
   { label: 'Staff accounts', to: '/account' },
 ];

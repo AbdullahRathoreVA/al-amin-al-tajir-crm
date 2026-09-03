@@ -93,7 +93,7 @@ interface ProgramRow {
   age_ladder: number; capacity: number | null;
 }
 
-const monthsLabel = (m: number): string =>
+export const monthsLabel = (m: number): string =>
   m < 24 ? `${m} month${m === 1 ? '' : 's'}` : `${Math.floor(m / 12)} years`;
 
 /**
@@ -301,4 +301,116 @@ export function startAgeSchedule(intervalHours = 24): void {
 
 export function stopAgeSchedule(): void {
   if (timer) { clearInterval(timer); timer = null; }
+}
+
+// ------------------------------------------------------- the whole picture
+
+export interface PlacementRow {
+  childId: string; name: string; familyId: string; familyName: string;
+  status: string;
+  dateOfBirth: string | null;
+  ageMonths: number | null;
+  ageLabel: string | null;
+  currentRoomId: string | null; currentRoom: string | null;
+  shouldBeProgramId: string | null; shouldBeProgram: string | null;
+  shouldBeRoomId: string | null; shouldBeRoom: string | null;
+  /** What a person has to do about this child, if anything. */
+  verdict: 'correct' | 'move' | 'unplaced' | 'no-room-for-age' | 'no-birthday';
+  reason: string;
+}
+
+/**
+ * Every child, and the room their age says they belong in.
+ *
+ * `outgrown()` answers a narrower question — who has aged past their room —
+ * and is what the register needs. This answers the question somebody actually
+ * asks when they open a spreadsheet of children: for each of these, where do
+ * they go? So it includes children with no room at all, children with no
+ * birthday recorded, and children who are already in the right place, because
+ * "everyone is fine" is only believable if the ones who are fine are shown.
+ */
+export function placementPlan(at = new Date()): PlacementRow[] {
+  const programs = many<ProgramRow>(
+    `SELECT id, name, min_months, max_months, age_ladder, capacity FROM programs WHERE active = 1`);
+  const ladder = programs
+    .filter((p) => p.age_ladder === 1 && p.min_months !== null && p.max_months !== null)
+    .sort((a, b) => (a.min_months ?? 0) - (b.min_months ?? 0));
+
+  const rooms = many<{ id: string; name: string; program_id: string | null; capacity: number | null; taken: number }>(
+    `SELECT r.id, r.name, r.program_id, r.capacity,
+            (SELECT COUNT(*) FROM children ch WHERE ch.classroom_id = r.id AND ch.status = 'enrolled') AS taken
+       FROM classrooms r WHERE r.active = 1`);
+
+  const roomFor = (programId: string) => {
+    const opts = rooms.filter((r) => r.program_id === programId)
+      .map((r) => ({ ...r, space: r.capacity == null ? null : Math.max(0, r.capacity - r.taken) }))
+      .sort((a, b) => (b.space ?? -1) - (a.space ?? -1) || a.name.localeCompare(b.name));
+    return opts[0] ?? null;
+  };
+
+  const children = many<{
+    id: string; first_name: string; last_name: string | null; date_of_birth: string | null;
+    status: string; classroom_id: string | null; family_id: string; family_name: string;
+    room_name: string | null;
+  }>(
+    `SELECT c.id, c.first_name, c.last_name, c.date_of_birth, c.status, c.classroom_id,
+            c.family_id, f.name AS family_name, r.name AS room_name
+       FROM children c
+       JOIN families f ON f.id = c.family_id
+       LEFT JOIN classrooms r ON r.id = c.classroom_id
+      WHERE c.status <> 'withdrawn'
+      ORDER BY f.name, c.first_name`);
+
+  return children.map((c): PlacementRow => {
+    const months = c.date_of_birth ? monthsBetween(c.date_of_birth, at) : null;
+    const base = {
+      childId: c.id,
+      name: [c.first_name, c.last_name].filter(Boolean).join(' '),
+      familyId: c.family_id, familyName: c.family_name,
+      status: c.status,
+      dateOfBirth: c.date_of_birth,
+      ageMonths: months,
+      ageLabel: months === null || months < 0 ? null : monthsLabel(months),
+      currentRoomId: c.classroom_id, currentRoom: c.room_name,
+    };
+
+    // Without a birthday there is nothing to reason from, and a guess about
+    // which room a child belongs in is exactly the wrong thing to guess.
+    if (months === null || months < 0) {
+      return { ...base, shouldBeProgramId: null, shouldBeProgram: null,
+        shouldBeRoomId: null, shouldBeRoom: null,
+        verdict: 'no-birthday',
+        reason: 'No date of birth recorded, so their age group cannot be worked out.' };
+    }
+
+    const fits = ladder.find((p) =>
+      months >= (p.min_months ?? 0) && months < (p.max_months ?? Number.MAX_SAFE_INTEGER));
+    if (!fits) {
+      return { ...base, shouldBeProgramId: null, shouldBeProgram: null,
+        shouldBeRoomId: null, shouldBeRoom: null,
+        verdict: 'no-room-for-age',
+        reason: `${monthsLabel(months)} old, and no room here covers that age.` };
+    }
+
+    const target = roomFor(fits.id);
+    const inRightPlace = c.classroom_id
+      && rooms.find((r) => r.id === c.classroom_id)?.program_id === fits.id;
+
+    const shape = {
+      ...base,
+      shouldBeProgramId: fits.id, shouldBeProgram: fits.name,
+      shouldBeRoomId: target?.id ?? null, shouldBeRoom: target?.name ?? null,
+    };
+
+    if (inRightPlace) {
+      return { ...shape, verdict: 'correct',
+        reason: `${monthsLabel(months)} old — ${fits.name} is the right group.` };
+    }
+    if (!c.classroom_id) {
+      return { ...shape, verdict: 'unplaced',
+        reason: `${monthsLabel(months)} old — belongs in ${fits.name}, but has no room yet.` };
+    }
+    return { ...shape, verdict: 'move',
+      reason: `${monthsLabel(months)} old — in ${c.room_name}, but ${fits.name} fits their age.` };
+  });
 }
