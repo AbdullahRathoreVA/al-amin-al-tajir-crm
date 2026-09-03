@@ -50,13 +50,28 @@ export const STAGES: [string, string, number, number, number][] = [
  *
  * Tiny Stars has no infant room, so nothing here covers under 12 months.
  */
-export const PROGRAMS: [string, string, string, number | null, number | null, number][] = [
-  ['twinkle-stars', 'Twinkle Stars', '12-18 months', 12, 18, 1],
-  ['comet-stars', 'Comet Stars', '18 months - 3 years', 18, 36, 1],
-  ['nova-stars', 'Nova Stars', '3-5 years', 36, 60, 1],
-  ['galaxy-stars', 'Galaxy Stars', '5-6 years', 60, 72, 1],
-  ['cosmic-stars', 'Cosmic Stars', '6-12 years', 72, 144, 1],
-  ['learning-adventures', 'Learning Adventures', 'Ages 2-5', 24, 60, 0],
+export const PROGRAMS: [string, string, string, number | null, number | null, number, number | null][] = [
+  // slug, name, label, min months, max months (exclusive), on the ladder, capacity.
+  //
+  // These are the centre's LICENSED ranges, from its own capacity poster, not
+  // a reading of the program names. The difference matters: 12-19 rather than
+  // 12-18 is a whole month of children in or out of the infant room.
+  //
+  // Capacity is per licensed range because that is how the licence is written.
+  // Rooms are left unmeasured rather than having 76 toddler places split three
+  // ways by guesswork.
+  ['twinkle-stars', 'Twinkle Stars', '12-19 months', 12, 19, 1, 28],
+  ['comet-stars', 'Comet Stars', '19-36 months', 19, 36, 1, 76],
+  ['nova-stars', 'Nova Stars', '3-4 years', 36, 48, 1, 46],
+  // No room in the enrolment export serves this range. The program exists so
+  // the ladder has no hole in it, and Ages & Rooms says plainly that the
+  // children who fit it have nowhere to go yet.
+  ['preschool-4-5', 'Pre-school (4-5)', '4-5 years', 48, 60, 1, 54],
+  ['galaxy-stars', 'Galaxy Stars', '5-6 years', 60, 72, 1, 74],
+  // The poster counts these places together with Kindergarten age, so the 74
+  // above covers both and this stays unmeasured rather than invented.
+  ['cosmic-stars', 'Cosmic Stars', 'Grades 1-6 (out of school care)', 72, 144, 1, null],
+  ['learning-adventures', 'Learning Adventures', 'Ages 2-5', 24, 60, 0, null],
 ];
 
 export function seedReference(): { stages: number; programs: number } {
@@ -71,12 +86,12 @@ export function seedReference(): { stages: number; programs: number } {
     stages++;
   }
 
-  for (const [i, [slug, name, age, minM, maxM, ladder]] of PROGRAMS.entries()) {
+  for (const [i, [slug, name, age, minM, maxM, ladder, cap]] of PROGRAMS.entries()) {
     if (one('SELECT id FROM programs WHERE slug = ?', slug)) continue;
     run(`INSERT INTO programs (id, slug, name, age_label, capacity, active, sort_order, created_at,
            min_months, max_months, age_ladder)
-         VALUES (?,?,?,?,NULL,1,?,?,?,?,?)`,
-      newId(), slug, name, age, i * 10, now, minM, maxM, ladder);
+         VALUES (?,?,?,?,?,1,?,?,?,?,?)`,
+      newId(), slug, name, age, cap, i * 10, now, minM, maxM, ladder);
     programs++;
   }
 

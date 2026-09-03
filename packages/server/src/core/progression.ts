@@ -332,6 +332,7 @@ export interface PlacementRow {
 export function placementPlan(at = new Date()): PlacementRow[] {
   const programs = many<ProgramRow>(
     `SELECT id, name, min_months, max_months, age_ladder, capacity FROM programs WHERE active = 1`);
+  const byId = new Map(programs.map((p) => [p.id, p]));
   const ladder = programs
     .filter((p) => p.age_ladder === 1 && p.min_months !== null && p.max_months !== null)
     .sort((a, b) => (a.min_months ?? 0) - (b.min_months ?? 0));
@@ -341,9 +342,30 @@ export function placementPlan(at = new Date()): PlacementRow[] {
             (SELECT COUNT(*) FROM children ch WHERE ch.classroom_id = r.id AND ch.status = 'enrolled') AS taken
        FROM classrooms r WHERE r.active = 1`);
 
+  /**
+   * Free places, falling back to the program when a room has none of its own.
+   *
+   * The centre's licence gives capacity per age range — 28 infant places, 76
+   * toddler — not per room, and splitting 76 across three rooms by guesswork
+   * would be a number nobody entered. So a room without its own capacity is
+   * measured against its program's remaining places, which is the figure that
+   * actually exists. Only when neither is set does it report "not measured".
+   */
   const roomFor = (programId: string) => {
+    const program = byId.get(programId);
+    const enrolledInProgram = Number(one<{ n: number }>(
+      `SELECT COUNT(*) n FROM children ch
+         LEFT JOIN classrooms r ON r.id = ch.classroom_id
+        WHERE ch.status = 'enrolled' AND COALESCE(r.program_id, ch.program_id) = ?`,
+      programId)?.n ?? 0);
+    const programSpace = program?.capacity == null
+      ? null : Math.max(0, program.capacity - enrolledInProgram);
+
     const opts = rooms.filter((r) => r.program_id === programId)
-      .map((r) => ({ ...r, space: r.capacity == null ? null : Math.max(0, r.capacity - r.taken) }))
+      .map((r) => ({
+        ...r,
+        space: r.capacity == null ? programSpace : Math.max(0, r.capacity - r.taken),
+      }))
       .sort((a, b) => (b.space ?? -1) - (a.space ?? -1) || a.name.localeCompare(b.name));
     return opts[0] ?? null;
   };

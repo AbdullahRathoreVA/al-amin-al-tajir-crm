@@ -45,11 +45,21 @@ describe('a brand new production install', () => {
     assert.ok(ref.programs >= 6, `expected the real programs, got ${ref.programs}`);
   });
 
-  test('programs match the public website, with no invented capacity', () => {
-    const comet = one<{ name: string; capacity: number | null }>(
-      "SELECT name, capacity FROM programs WHERE slug = 'comet-stars'");
+  test('programs carry the licensed capacity, and nothing else is invented', () => {
+    const comet = one<{ name: string; capacity: number | null; min_months: number; max_months: number }>(
+      "SELECT name, capacity, min_months, max_months FROM programs WHERE slug = 'comet-stars'");
     assert.equal(comet?.name, 'Comet Stars', 'a parent choosing this on the site finds the same thing here');
-    assert.equal(comet?.capacity, null,
+    // From the centre's own capacity poster: Toddler, 19-36 months, 76 places.
+    assert.equal(comet?.capacity, 76);
+    assert.equal(comet?.min_months, 19, '19 months, not 18 — a whole month of children either way');
+    assert.equal(comet?.max_months, 36);
+
+    // The poster counts Kindergarten age and out-of-school care as one range,
+    // so this one genuinely has no number of its own and must stay null rather
+    // than being invented by halving somebody else's.
+    const osc = one<{ capacity: number | null }>(
+      "SELECT capacity FROM programs WHERE slug = 'cosmic-stars'");
+    assert.equal(osc?.capacity, null,
       'capacity nobody has told us must stay null, or occupancy becomes fiction');
   });
 

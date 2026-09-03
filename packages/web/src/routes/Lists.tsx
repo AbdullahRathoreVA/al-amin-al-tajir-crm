@@ -6,6 +6,7 @@ import {
   Panel, Badge, Button, Empty, Spinner, ErrorNote, When, clockTime, isOverdue, toneForStatus, type Tone,
 } from '../ui/kit.tsx';
 import { AddFamily } from '../ui/AddFamily.tsx';
+import { AddTask } from '../ui/AddTask.tsx';
 
 /** Shared page frame: title, saved filters, and the list itself. (spec 288) */
 function ListPage(
@@ -360,6 +361,7 @@ export function Tasks() {
   const filter = query.get('filter') ?? '';
   const res = useApi<{ tasks: TaskRow[] }>(`/tasks${filter ? `?filter=${filter}` : ''}`);
   const [busy, setBusy] = useState<string | null>(null);
+  const [adding, setAdding] = useState(false);
 
   async function complete(id: string) {
     setBusy(id);
@@ -375,6 +377,7 @@ export function Tasks() {
     <ListPage
       title="Tasks" base="/tasks" active={filter}
       subtitle="Work the system created for you, and work you created yourself. Each one says why it exists."
+      action={<Button variant="primary" onClick={() => setAdding(true)}>+ Add a task</Button>}
       filters={[
         { id: '', label: 'Open' },
         { id: 'overdue', label: 'Overdue' },
@@ -423,6 +426,7 @@ export function Tasks() {
             </ul>
           )
       )}
+      {adding && <AddTask onClose={() => setAdding(false)} onCreated={res.reload} />}
     </ListPage>
   );
 }

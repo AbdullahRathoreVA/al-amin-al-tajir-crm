@@ -2378,15 +2378,15 @@ describe('children growing into the next room', () => {
   test('a child past their room shows up, with the room that fits and why', () => {
     const familyId = insertFamily('Novak family', 'manual', null, STAFF);
     const childId = addChild(familyId, { firstName: 'Petra' }, STAFF);
-    // Four years old, still in the 18 months - 3 years room.
+    // Three years old, still in the 19 months - 3 years room.
     execSql('UPDATE children SET date_of_birth = ?, status = ?, program_id = ? WHERE id = ?',
-      yearsAgo(4), 'enrolled', programId('comet-stars'), childId);
+      yearsAgo(3), 'enrolled', programId('comet-stars'), childId);
 
     const row = outgrown().find((o) => o.childId === childId);
-    assert.ok(row, 'a four-year-old in the toddler room must be flagged');
+    assert.ok(row, 'a three-year-old in the toddler room must be flagged');
     assert.equal(row.currentProgram, 'Comet Stars');
-    assert.equal(row.suggestedProgram, 'Nova Stars');
-    assert.match(row.reason, /4 years old/);
+    assert.equal(row.suggestedProgram, 'Nova Stars', '3-4 years is Nova Stars');
+    assert.match(row.reason, /3 years old/);
   });
 
   test('nobody is moved: the flag is a report, not an action', () => {
@@ -2500,7 +2500,7 @@ describe('moving a child up, by room', () => {
     const familyId = insertFamily('Halim family', 'manual', null, STAFF);
     const childId = addChild(familyId, { firstName: 'Sami' }, STAFF);
     execSql('UPDATE children SET date_of_birth = ?, status = ?, classroom_id = ? WHERE id = ?',
-      yearsAgo(4), 'enrolled', String(comet.id), childId);
+      yearsAgo(3), 'enrolled', String(comet.id), childId);
 
     const row = outgrown().find((o) => o.childId === childId);
     assert.ok(row);
@@ -2850,7 +2850,7 @@ describe('where every child should go', () => {
     const fid = insertFamily('Unplaced family', 'manual', null, STAFF);
     const cid = addChild(fid, { firstName: 'Needsroom' }, STAFF);
     execSql('UPDATE children SET date_of_birth = ?, status = ? WHERE id = ?',
-      yearsAgo(4), 'enrolled', cid);
+      yearsAgo(3), 'enrolled', cid);
 
     const row = placementPlan().find((r) => r.childId === cid);
     assert.ok(row);
@@ -2865,7 +2865,7 @@ describe('where every child should go', () => {
     const fid = insertFamily('Correct family', 'manual', null, STAFF);
     const cid = addChild(fid, { firstName: 'Rightplace' }, STAFF);
     execSql('UPDATE children SET date_of_birth = ?, status = ?, classroom_id = ? WHERE id = ?',
-      yearsAgo(4), 'enrolled', String(room.id), cid);
+      yearsAgo(3), 'enrolled', String(room.id), cid);
 
     const row = placementPlan().find((r) => r.childId === cid);
     assert.ok(row, '"everyone is fine" is only believable if the fine ones are shown');
@@ -3103,5 +3103,66 @@ describe('money written as words', () => {
   test('digits still win, and are unaffected', () => {
     assert.equal(parseMoney('$84.32 from Costco'), 8432);
     assert.equal(parseMoney('bought 50 usd milk'), 5000);
+  });
+});
+
+describe("the centre's licensed age ranges", () => {
+  // Straight off the capacity poster. If somebody changes a bound, this says
+  // so loudly — the ranges decide which room every child belongs in.
+  const prog = (slug: string) => one<{ min_months: number; max_months: number; capacity: number | null }>(
+    'SELECT min_months, max_months, capacity FROM programs WHERE slug = ?', slug);
+
+  test('the ranges are the licence, not a guess from the names', () => {
+    const check = (slug: string, min: number, max: number, cap: number) => {
+      const p = prog(slug);
+      assert.ok(p, `${slug} should exist`);
+      assert.equal(p.min_months, min, `${slug} starts at ${min} months`);
+      assert.equal(p.max_months, max, `${slug} ends at ${max} months`);
+      assert.equal(p.capacity, cap, `${slug} is licensed for ${cap}`);
+    };
+    check('twinkle-stars', 12, 19, 28);   // Infant
+    check('comet-stars', 19, 36, 76);     // Toddler
+    check('nova-stars', 36, 48, 46);      // Pre-school 3-4
+    check('preschool-4-5', 48, 60, 54);   // Pre-school 4-5
+    check('galaxy-stars', 60, 72, 74);    // Kindergarten age
+  });
+
+  test('the ladder has no hole in it', () => {
+    // A gap between two rungs is a child with nowhere to go and no explanation.
+    const rungs = many<{ min_months: number; max_months: number; name: string }>(
+      `SELECT min_months, max_months, name FROM programs
+        WHERE active = 1 AND age_ladder = 1 AND min_months IS NOT NULL
+        ORDER BY min_months`);
+    for (let i = 1; i < rungs.length; i++) {
+      assert.equal(rungs[i]!.min_months, rungs[i - 1]!.max_months,
+        `gap or overlap between ${rungs[i - 1]!.name} and ${rungs[i]!.name}`);
+    }
+  });
+
+  test('the licensed places add up to the poster total', () => {
+    const total = Number(one<{ n: number }>(
+      `SELECT SUM(capacity) n FROM programs WHERE active = 1 AND age_ladder = 1`)?.n ?? 0);
+    // 28 + 76 + 46 + 54 + 74. Out-of-school care shares the 74 and is null.
+    assert.equal(total, 278, "the poster's total is 278 places");
+  });
+
+  test('a room with no capacity of its own falls back to the licensed places', () => {
+    // The licence gives places per age range, not per room, so splitting 76
+    // toddler places across three rooms by guesswork would be a number nobody
+    // entered. The program's remaining places is the figure that exists.
+    const STAFF = { type: 'user' as const, id: null, source: 'manual' };
+    const pid = one<{ id: string }>("SELECT id FROM programs WHERE slug='galaxy-stars'")!.id;
+    createClassroom('Licence Galaxy', { programId: pid }, STAFF);   // no capacity set
+
+    const familyId = insertFamily('Licence family', 'manual', null, STAFF);
+    const childId = addChild(familyId, { firstName: 'Licencekid' }, STAFF);
+    const d = new Date(); d.setFullYear(d.getFullYear() - 5);
+    execSql('UPDATE children SET date_of_birth = ?, status = ? WHERE id = ?',
+      d.toISOString().slice(0, 10), 'enrolled', childId);
+
+    const row = placementPlan().find((r) => r.childId === childId);
+    assert.ok(row);
+    assert.equal(row.shouldBeProgram, 'Galaxy Stars');
+    assert.ok(row.shouldBeRoomId, 'the room exists even though it has no capacity of its own');
   });
 });
