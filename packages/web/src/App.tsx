@@ -12,6 +12,7 @@ import { Import } from './routes/Import.tsx';
 import { Automations } from './routes/Automations.tsx';
 import { Attendance } from './routes/Attendance.tsx';
 import { Logbook } from './routes/Logbook.tsx';
+import { Help } from './routes/Help.tsx';
 
 /**
  * `cap` hides an entry from roles that cannot use it. Only the register is
@@ -31,11 +32,12 @@ const NAV: { to: string; label: string; glyph: string; cap?: string }[] = [
   { to: '/automations', label: 'Automations', glyph: '↻' },
   { to: '/import', label: 'Import', glyph: '⤓' },
   { to: '/system', label: 'System', glyph: '⚙' },
+  { to: '/help', label: 'Help', glyph: '?' },
 ];
 
 // What a phone actually needs. The register is on it because marking children
 // in is done standing in a doorway, not at a desk. (spec 239)
-const MOBILE_NAV = ['/', '/attendance', '/tasks', '/tours', '/families', '/system'];
+const MOBILE_NAV = ['/', '/attendance', '/tasks', '/families', '/help'];
 
 export function App() {
   return <RouterProvider><Root /></RouterProvider>;
@@ -263,6 +265,7 @@ function Routes({ userName }: { userName: string }) {
   if (path === '/import') return <Import />;
   if (path === '/automations') return <Automations />;
   if (path === '/system' || path === '/programs') return <System />;
+  if (path === '/help') return <Help />;
   return (
     <Panel><div className="py-8 text-center">
       <p className="text-sm font-medium">This page does not exist.</p>
@@ -362,6 +365,7 @@ const ACTIONS = [
   { label: 'My tasks', to: '/tasks?filter=mine' },
   { label: 'Possible duplicate families', to: '/families?filter=duplicates' },
   { label: 'System health', to: '/system' },
+  { label: 'Help: how do I…', to: '/help' },
 ];
 
 function CommandBar({ onClose }: { onClose: () => void }) {

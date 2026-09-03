@@ -45,6 +45,8 @@ const { refreshAgeBands, outgrown, upcomingBirthdays, progressionSummary } =
   await import('../packages/server/src/core/progression.ts');
 const { familiesWorkbook, admissionsWorkbook, deFormula, exportCounts } =
   await import('../packages/server/src/core/exports.ts');
+const { HELP, HELP_SECTIONS, searchHelp, topicsAsContext } =
+  await import('../packages/server/src/core/help.ts');
 const { addChild, addGuardian, updateChild, updateGuardian, insertFamily,
         ageBandFor, ageLabel, monthsBetween } =
   await import('../packages/server/src/core/people.ts');
@@ -2578,5 +2580,94 @@ describe('exporting a spreadsheet people can read', () => {
     const everything = sheets.flatMap((s) => s.rows.flat()).join(' | ');
     assert.equal(/\bChidi\b/.test(everything), false,
       'this file goes into meetings — it should not identify children');
+  });
+});
+
+// ------------------------------------------------------------------- help
+//
+// The Help is the only support channel the person running the daycare has.
+// These guard the things that would quietly rot it: a broken cross-reference,
+// a topic filed under a section that no longer exists, or a search that cannot
+// find the answer to the most ordinary question somebody will type.
+
+describe('the built-in guide', () => {
+  test('every topic is complete enough to be worth showing', () => {
+    for (const t of HELP) {
+      assert.ok(t.id && /^[a-z0-9-]+$/.test(t.id), `bad id: ${t.id}`);
+      assert.ok(t.title.length > 3, `${t.id} needs a title`);
+      assert.ok(t.summary.length > 10, `${t.id} needs a real summary`);
+      assert.ok(t.body.length > 0, `${t.id} has no body`);
+      assert.ok((HELP_SECTIONS as readonly string[]).includes(t.section),
+        `${t.id} is filed under "${t.section}", which is not a section`);
+    }
+  });
+
+  test('topic ids are unique', () => {
+    const ids = HELP.map((t) => t.id);
+    assert.equal(new Set(ids).size, ids.length, 'two topics share an id');
+  });
+
+  test('every "see also" points at a topic that exists', () => {
+    const ids = new Set(HELP.map((t) => t.id));
+    for (const t of HELP) {
+      for (const r of t.related ?? []) {
+        assert.ok(ids.has(r), `${t.id} links to "${r}", which does not exist`);
+      }
+    }
+  });
+
+  test('every section has at least one topic in it', () => {
+    for (const section of HELP_SECTIONS) {
+      assert.ok(HELP.some((t) => t.section === section), `"${section}" is empty`);
+    }
+  });
+
+  test('the questions people will actually type find the right topic', () => {
+    // If one of these breaks, the guide has drifted from the software and the
+    // person on the other end gets a wrong answer with no way to know.
+    const expectations: [string, string][] = [
+      ['how do I add a child', 'add-a-family'],
+      ['import excel spreadsheet', 'importing-a-spreadsheet'],
+      ['check in attendance', 'the-register'],
+      ['what can an educator see', 'who-can-see-what'],
+      ['export to excel', 'exports'],
+      ['grocery expenses receipt', 'the-logbook'],
+      ['child moving to the next room', 'moving-up-a-room'],
+      ['instagram whatsapp facebook', 'not-built-yet'],
+      ['forgot my password', 'signing-in'],
+      ['backup restore', 'backups'],
+      ['does it use ai', 'ai-what-it-does'],
+      ['something is broken', 'something-went-wrong'],
+    ];
+    for (const [question, expected] of expectations) {
+      const hits = searchHelp(question, 4).map((t) => t.id);
+      assert.ok(hits.includes(expected),
+        `"${question}" should find ${expected}, found: ${hits.join(', ') || 'nothing'}`);
+    }
+  });
+
+  test('a question about nothing returns nothing rather than a wrong guess', () => {
+    assert.deepEqual(searchHelp('zzzzq'), []);
+    assert.deepEqual(searchHelp(''), []);
+    assert.deepEqual(searchHelp('!!! ???'), []);
+  });
+
+  test('the AI is given the guide text and nothing else', () => {
+    const context = topicsAsContext(searchHelp('how do I add a child', 2));
+    assert.ok(context.includes('Add'), 'the matched topic should be in the context');
+    // What must NOT be in there: anything from the database. The context is
+    // built purely from these static topics, so a family name appearing would
+    // mean somebody wired real records into it.
+    assert.equal(/Whitfield|Okonkwo|@example\.invalid/.test(context), false,
+      'help context must never carry family data');
+  });
+
+  test('the guide states what is not built, so nobody hunts for it', () => {
+    const missing = HELP.find((t) => t.id === 'not-built-yet');
+    assert.ok(missing);
+    const text = [...missing.body, ...(missing.notes ?? [])].join(' ').toLowerCase();
+    for (const gap of ['instagram', 'billing', 'incident', 'staff']) {
+      assert.ok(text.includes(gap), `the "not built" topic should mention ${gap}`);
+    }
   });
 });

@@ -10,6 +10,7 @@ import { newId, nowIso, plain, plainAll, safeJson, familyNameFrom } from './core
 import { findFamilyMatches } from './core/match.ts';
 import { progressionSummary } from './core/progression.ts';
 import { familiesWorkbook, admissionsWorkbook, exportCounts } from './core/exports.ts';
+import { HELP, HELP_SECTIONS, searchHelp, topicsAsContext } from './core/help.ts';
 import {
   insertFamily, upsertGuardian, addChild, addGuardian, updateChild, updateGuardian,
   reindexFamily, type ChildPatch, type GuardianPatch,
@@ -32,7 +33,7 @@ import { parseTabular, guessMapping, preview as previewImport, commitImport, IMP
 import { createBackup, listBackups, testRestore, pruneBackups } from './core/backup.ts';
 import { listAutomations, runAutomation, runScheduled, recentRuns, runsFor, disableAll,
   TRIGGERS, type Automation } from './core/automations.ts';
-import { aiStatus, summariseFamily, dailyBrief, factsForFamily } from './core/ai.ts';
+import { aiStatus, summariseFamily, dailyBrief, factsForFamily, provider as aiProvider } from './core/ai.ts';
 import { listTargets, upsertTarget, runChannel, recentRuns as syncRuns, channelStatus,
          DEFAULT_MAPPING, mappingFor, targetFor, SYNC_CHANNELS } from './core/sync.ts';
 import {
@@ -1220,6 +1221,78 @@ function dayParam(c: Ctx): string {
  * Read-only on purpose. The move itself goes through the existing placement
  * endpoint, which means a person decides it and the event log records who.
  */
+// ---------------------------------------------------------------- help
+//
+// The whole user guide, and a question box over it. Available to every signed
+// in role: help about a screen you cannot open is harmless, and a person who
+// cannot find out how something works will invent a worse way to do it.
+
+router.get('/api/v1/help', () => ({ sections: HELP_SECTIONS, topics: HELP }));
+
+/**
+ * Answers a question about using the CRM.
+ *
+ * The search is deterministic and always runs, so this works with AI switched
+ * off — that is the baseline, not a fallback. When a provider is configured it
+ * also writes a short answer, and it is given ONLY the matching help topics to
+ * write from. No family data, no database, no general knowledge: an AI that
+ * confidently describes a feature this CRM does not have is worse than no
+ * answer, because the person will go looking for it.
+ */
+router.post('/api/v1/help/ask', async (c) => {
+  const b = requireBody<{ question?: string }>(c);
+  const question = (b.question ?? '').trim().slice(0, 300);
+  if (!question) throw badRequest('Type a question first');
+
+  const topics = searchHelp(question, 4);
+  const base = {
+    question,
+    topics: topics.map((t) => ({ id: t.id, title: t.title, summary: t.summary, section: t.section })),
+  };
+
+  if (!topics.length) {
+    return {
+      ...base,
+      answer: null,
+      answeredBy: 'none' as const,
+      note: 'Nothing in the guide covers that. Try a different word, or browse the sections below.',
+    };
+  }
+
+  const ai = aiProvider();
+  if (!ai) {
+    return {
+      ...base,
+      answer: null,
+      answeredBy: 'search' as const,
+      note: 'These are the parts of the guide that match. Turn on an AI provider to get an answer written out.',
+    };
+  }
+
+  const prompt = [
+    'You are answering a question from a person who runs a daycare, about the software they use.',
+    'Answer ONLY from the guide below. If the guide does not answer the question, say so plainly.',
+    'Never describe a feature that is not in the guide. Do not guess. Do not invent numbers.',
+    'Two or three short sentences, plain words, no jargon, no lists.',
+    '',
+    '--- GUIDE ---',
+    topicsAsContext(topics),
+    '--- END GUIDE ---',
+    '',
+    `Question: ${question}`,
+  ].join('\n');
+
+  const answer = await ai.complete(prompt, { maxTokens: 300 });
+  return {
+    ...base,
+    answer,
+    answeredBy: answer ? ('ai' as const) : ('search' as const),
+    note: answer
+      ? `Written by ${ai.name} from the guide only. Check the topics below if in doubt.`
+      : 'The AI provider did not answer. These are the matching parts of the guide.',
+  };
+});
+
 router.get('/api/v1/progression', (c) => {
   c.require('classroom:read');
   return progressionSummary();
