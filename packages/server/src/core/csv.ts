@@ -123,7 +123,7 @@ export function parseCsv(text: string): ParsedCsv {
 export const IMPORT_FIELDS = [
   'guardianName', 'guardianEmail', 'guardianPhone', 'guardianRelationship',
   'childFirstName', 'childLastName', 'childDob', 'childAgeBand',
-  'program', 'desiredStart', 'notes', 'status',
+  'program', 'classroom', 'desiredStart', 'notes', 'status',
 ] as const;
 export type ImportField = (typeof IMPORT_FIELDS)[number];
 
@@ -137,6 +137,7 @@ export const FIELD_LABELS: Record<ImportField, string> = {
   childDob: "Child's date of birth",
   childAgeBand: 'Age band',
   program: 'Program',
+  classroom: 'Room',
   desiredStart: 'Desired start',
   notes: 'Notes',
   status: 'Status',
@@ -170,8 +171,9 @@ const ALIASES: Record<ImportField, string[]> = {
   childDob: ['dob', 'dateofbirth', 'birthdate', 'birthday', 'childdob',
     'studentdateofbirth', 'childdateofbirth', 'birthdatemmddyyyy'],
   childAgeBand: ['ageband', 'age', 'agegroup', 'agerange'],
-  program: ['program', 'programme', 'room', 'class', 'classroom', 'programinterest',
-    'group', 'currentroom', 'enrolledroom', 'classroomname'],
+  program: ['program', 'programme', 'programinterest'],
+  classroom: ['classroom', 'room', 'class', 'classroomname', 'group',
+    'currentroom', 'enrolledroom', 'roomname'],
   desiredStart: ['startdate', 'desiredstart', 'start', 'preferredstart', 'enrolmentdate', 'enrollmentdate',
     'enrollmentstartdate', 'startingdate', 'admissiondate', 'enrolldate', 'enroldate'],
   notes: ['notes', 'note', 'comments', 'comment', 'questions', 'message'],
@@ -222,13 +224,46 @@ interface Resolved {
   guardianRelationship: string | null;
   childFirstName: string | null; childLastName: string | null;
   childDob: string | null; childAgeBand: string | null;
-  program: string | null; desiredStart: string | null; notes: string | null;
+  program: string | null; classroom: string | null;
+  desiredStart: string | null; notes: string | null;
   action: 'create' | 'update' | 'skip';
   existingFamilyId: string | null;
   /** Set when an EARLIER row in the same file already claimed this contact.
    *  Resolution decides this once so the preview and the commit cannot
    *  disagree about how many families a file produces. */
   joinsRow: number | null;
+}
+
+/**
+ * A room named in an import, found or created.
+ *
+ * Lillio names its rooms after the program with a colour in front — "Blue
+ * Twinkle Stars", "Purple Nova Stars", "Galaxy Stars Map". Those are ROOMS,
+ * not programs: there are nine of them across five programs, and treating the
+ * name as a program meant 134 children imported with no room at all and the
+ * Ages & Rooms screen reporting every one of them as unplaced.
+ *
+ * The program is inferred from the name by looking for a known program inside
+ * it, longest first so "Galaxy Stars" is not shadowed by "Stars". A room whose
+ * program cannot be worked out is still created — losing the room because the
+ * naming is unfamiliar would be worse than a room with no program — and shows
+ * up on the Register with no program set, which is visible and fixable.
+ */
+function resolveClassroom(name: string, now: string): { id: string; programId: string | null } {
+  const trimmed = name.trim().slice(0, 120);
+  const existing = one<{ id: string; program_id: string | null }>(
+    'SELECT id, program_id FROM classrooms WHERE LOWER(name) = ?', trimmed.toLowerCase());
+  if (existing) return { id: existing.id, programId: existing.program_id };
+
+  const programs = many<{ id: string; name: string }>(
+    'SELECT id, name FROM programs WHERE active = 1 ORDER BY LENGTH(name) DESC');
+  const lower = trimmed.toLowerCase();
+  const programId = programs.find((p) => lower.includes(p.name.toLowerCase()))?.id ?? null;
+
+  const id = newId();
+  run(`INSERT INTO classrooms (id, name, program_id, capacity, active, created_at)
+       VALUES (?,?,?,NULL,1,?)`, id, trimmed, programId, now);
+  return { id, programId };
 }
 
 const cell = (row: string[], idx: number | undefined): string =>
@@ -286,6 +321,7 @@ function resolveRows(
       childDob: parseDate(cell(row, mapping.childDob), rowNumber, issues),
       childAgeBand: null,
       program: cell(row, mapping.program) || null,
+      classroom: cell(row, mapping.classroom) || null,
       desiredStart: cell(row, mapping.desiredStart) || null,
       notes: cell(row, mapping.notes) || null,
       action: 'create', existingFamilyId: null, joinsRow: null,
@@ -371,14 +407,51 @@ function resolveRows(
      * two children in one nursery sharing all three is vanishingly unlikely,
      * and if it happened they would need telling apart by hand anyway.
      */
-    if (r.action !== 'skip' && r.joinsRow === null && r.childFirstName && r.childDob) {
-      const sameChild = one<{ family_id: string }>(
-        `SELECT family_id FROM children
-          WHERE LOWER(first_name) = ? AND date_of_birth = ?
-            AND LOWER(COALESCE(last_name, '')) = ?
-          LIMIT 1`,
-        r.childFirstName.toLowerCase(), r.childDob,
-        (r.childLastName ?? '').toLowerCase());
+    // Deliberately NOT guarded by `joinsRow`. Siblings share a parent's email,
+    // so the second sibling's row gets marked as joining the first — and if
+    // that skipped the identity check, the sibling was created fresh instead of
+    // matching the child already in the CRM. Seventeen children duplicated that
+    // way on the real files. A child's own identity beats a shared contact.
+    if (r.action !== 'skip' && r.childFirstName) {
+      const first = r.childFirstName.toLowerCase();
+      const last = (r.childLastName ?? '').toLowerCase();
+
+      // With a birthday, the match is exact and safe.
+      let sameChild = r.childDob
+        ? one<{ family_id: string }>(
+            `SELECT family_id FROM children
+              WHERE LOWER(first_name) = ? AND date_of_birth = ?
+                AND LOWER(COALESCE(last_name, '')) = ?
+              LIMIT 1`, first, r.childDob, last)
+        : undefined;
+
+      /**
+       * Without a birthday, name alone — but only when it is unambiguous.
+       *
+       * Lillio's Contacts Report carries no date of birth: it is First Name,
+       * Last Name, Classroom, Guardian, Email, Phone, one row per guardian. It
+       * is meant to be read alongside the enrolment report, and without this
+       * every one of its 233 rows created a brand new family, tripling the
+       * nursery.
+       *
+       * If two children share a first and last name the match is refused and a
+       * person is told, because attaching a parent to the wrong child is far
+       * worse than leaving it for somebody to do by hand.
+       */
+      if (!sameChild && r.childLastName) {
+        const byName = many<{ family_id: string }>(
+          `SELECT DISTINCT family_id FROM children
+            WHERE LOWER(first_name) = ? AND LOWER(COALESCE(last_name, '')) = ?
+            LIMIT 3`, first, last);
+        if (byName.length === 1) sameChild = byName[0];
+        else if (byName.length > 1) {
+          issues.push({
+            row: rowNumber, field: 'childFirstName', severity: 'warning',
+            message: `More than one child is called ${r.childFirstName} ${r.childLastName}, and this row has no date of birth to tell them apart. A separate record is created for somebody to merge.`,
+          });
+        }
+      }
+
       if (sameChild) {
         r.action = 'update';
         r.existingFamilyId = sameChild.family_id;
@@ -471,8 +544,10 @@ export function commitImport(
     // The same child twice inside one file — a roster exported mid-edit, or a
     // sheet somebody pasted onto itself — joins the same family rather than
     // creating two. Same identity as the check against the database above.
-    if (r.childFirstName && r.childDob) {
-      keys.push(`c:${r.childFirstName.toLowerCase()}|${(r.childLastName ?? '').toLowerCase()}|${r.childDob}`);
+    if (r.childFirstName) {
+      // Name-only when there is no birthday, which is how the Contacts Report
+      // joins its several guardian rows onto one child.
+      keys.push(`c:${r.childFirstName.toLowerCase()}|${(r.childLastName ?? '').toLowerCase()}`);
     }
     return keys;
   };
@@ -559,6 +634,21 @@ export function commitImport(
             newId(), familyId, r.childFirstName, r.childLastName, r.childDob,
             r.childAgeBand ?? ageBandFor(r.childDob), now, now,
           );
+        }
+
+        // A roll names the room each child is actually in, so put them there.
+        // A child on an enrolment report is attending, not prospective — the
+        // register and every ratio depend on that being right.
+        if (r.classroom) {
+          const room = resolveClassroom(r.classroom, now);
+          const childRow = one<{ id: string }>(
+            'SELECT id FROM children WHERE family_id = ? AND LOWER(first_name) = ? LIMIT 1',
+            familyId, r.childFirstName.toLowerCase());
+          if (childRow) {
+            run(`UPDATE children SET classroom_id = ?, program_id = COALESCE(?, program_id),
+                   status = 'enrolled', updated_at = ? WHERE id = ?`,
+              room.id, room.programId, now, childRow.id);
+          }
         }
       }
 

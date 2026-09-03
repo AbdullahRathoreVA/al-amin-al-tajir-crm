@@ -2705,7 +2705,9 @@ describe('managing your own account', () => {
     assert.equal(m.childFirstName, 0);
     assert.equal(m.childLastName, 1);
     assert.equal(m.childDob, 2);
-    assert.equal(m.program, 3);
+    // A room, not a program: "Blue Twinkle Stars" is the Twinkle Stars
+    // program with a colour on it, and there are nine such rooms.
+    assert.equal(m.classroom, 3);
     assert.equal(m.guardianName, 4);
     assert.equal(m.guardianEmail, 5);
     assert.equal(m.guardianPhone, 6);
@@ -2883,7 +2885,7 @@ describe("Lillio's own export, as the centre actually has it", () => {
     assert.equal(m.childFirstName, 0);
     assert.equal(m.childLastName, 1);
     assert.equal(m.childDob, 2);
-    assert.equal(m.program, 3);
+    assert.equal(m.classroom, 3, 'Classroom is a room, not a program');
     assert.equal(m.desiredStart, 4, '"Enroll Date" should map, not be left over');
   });
 
@@ -2998,3 +3000,108 @@ describe('importing the same roster every month', () => {
   });
 });
 
+
+describe('the two Lillio reports, together', () => {
+  // The centre has two exports and they are meant to be read as a pair:
+  //   Active Enrolment — one row per child, with the room and the birthday
+  //   Contacts         — one row per GUARDIAN, no birthday at all
+  // Both were imported for real, and every bug below was found doing it.
+  const EN = ['First Name', 'Last Name', 'Date of Birth', 'Classroom', 'Enroll Date'];
+  const CO = ['First Name', 'Last Name', 'Classroom', 'Guardian Name', 'Email', 'Mobile Phone'];
+  const A = actorFor({ id: 'lillio' });
+  const enrol = [
+    ['Marit', 'Solberg', '2024-04-02', 'Blue Twinkle Stars', '2026-05-01'],
+    ['Rune', 'Solberg', '2022-01-15', 'Purple Comet Stars', '2026-05-01'],
+  ];
+  const contacts = [
+    ['Marit', 'Solberg', 'Blue Twinkle Stars', 'Ingrid Solberg', 'ingrid@example.invalid', '780-555-0301'],
+    ['Marit', 'Solberg', 'Blue Twinkle Stars', 'Lars Solberg', 'lars@example.invalid', '780-555-0302'],
+    ['Rune', 'Solberg', 'Purple Comet Stars', 'Ingrid Solberg', 'ingrid@example.invalid', '780-555-0301'],
+  ];
+  const tab = (h: string[], r: string[][]) => ({ headers: h, rows: r, truncated: false });
+  const kidsNamed = () => Number(one<{ n: number }>(
+    "SELECT COUNT(*) n FROM children WHERE last_name = 'Solberg'")?.n ?? 0);
+
+  test('the room is a room, not a program, and it is created and filled', () => {
+    commitImport(tab(EN, enrol), guessMapping(EN), A, 'Enrolment');
+    const room = one<{ id: string; program_id: string | null }>(
+      "SELECT id, program_id FROM classrooms WHERE name = 'Blue Twinkle Stars'");
+    assert.ok(room, 'the room named in the file should exist');
+
+    // "Blue Twinkle Stars" is the Twinkle Stars program with a colour on it.
+    const prog = one<{ name: string }>('SELECT name FROM programs WHERE id = ?', room.program_id!);
+    assert.equal(prog?.name, 'Twinkle Stars');
+
+    const child = one<{ classroom_id: string; status: string }>(
+      "SELECT classroom_id, status FROM children WHERE first_name = 'Marit'");
+    assert.equal(child?.classroom_id, room.id, 'a child on a roll is in the room the roll names');
+    assert.equal(child?.status, 'enrolled', 'and is attending, not prospective');
+  });
+
+  test('the contacts report attaches parents without inventing children', () => {
+    // It carries no date of birth, so the match is on name — and every one of
+    // its rows created a new family before that was handled.
+    commitImport(tab(CO, contacts), guessMapping(CO), A, 'Contacts');
+    assert.equal(kidsNamed(), 2, 'two children, not five');
+
+    const guardians = many<{ first_name: string }>(
+      `SELECT g.first_name FROM guardians g
+        JOIN families f ON f.id = g.family_id
+        JOIN children c ON c.family_id = f.id
+       WHERE c.first_name = 'Marit'`);
+    assert.equal(guardians.length, 2, 'Marit has both parents on her family');
+  });
+
+  test('siblings sharing a parent do not duplicate each other', () => {
+    // Rune's contact row shares Ingrid's email with Marit's, so it was marked
+    // as joining Marit's row — which skipped the child check and created a
+    // second Rune. Seventeen children duplicated exactly this way on the real
+    // files.
+    assert.equal(Number(one<{ n: number }>(
+      "SELECT COUNT(*) n FROM children WHERE first_name = 'Rune'")?.n ?? 0), 1);
+  });
+
+  test('importing both files again changes nothing at all', () => {
+    const before = kidsNamed();
+    const gBefore = Number(one<{ n: number }>(
+      `SELECT COUNT(*) n FROM guardians g JOIN families f ON f.id = g.family_id
+        JOIN children c ON c.family_id = f.id WHERE c.last_name = 'Solberg'`)?.n ?? 0);
+
+    commitImport(tab(EN, enrol), guessMapping(EN), A, 'Enrolment again');
+    commitImport(tab(CO, contacts), guessMapping(CO), A, 'Contacts again');
+
+    assert.equal(kidsNamed(), before, 'the whole roll every month must not stack up');
+    assert.equal(Number(one<{ n: number }>(
+      `SELECT COUNT(*) n FROM guardians g JOIN families f ON f.id = g.family_id
+        JOIN children c ON c.family_id = f.id WHERE c.last_name = 'Solberg'`)?.n ?? 0), gBefore);
+  });
+});
+
+describe('money written as words', () => {
+  test('the sentence people actually say', () => {
+    // "I bought eighty dollars milk from Imtiaz" read as no amount at all,
+    // which then made it a note and kept it out of every total.
+    const d = parseUtterance('i bought eighty dollars milk from Imtiaz', '2026-09-03');
+    assert.equal(d.kind, 'purchase');
+    assert.equal(d.amountCents, 8000);
+    assert.equal(d.vendor, 'Imtiaz');
+  });
+
+  test('tens, hundreds and thousands', () => {
+    assert.equal(parseMoney('twenty five dollars of wipes'), 2500);
+    assert.equal(parseMoney('a hundred dollars at Costco'), 10000);
+    assert.equal(parseMoney('two thousand three hundred dollars'), 230000);
+    assert.equal(parseMoney('forty-two dollars'), 4200);
+  });
+
+  test('a count is still not an amount', () => {
+    // The whole reason a currency word is required.
+    assert.equal(parseMoney('two boxes of gloves'), null);
+    assert.equal(parseMoney('three children away today'), null);
+  });
+
+  test('digits still win, and are unaffected', () => {
+    assert.equal(parseMoney('$84.32 from Costco'), 8432);
+    assert.equal(parseMoney('bought 50 usd milk'), 5000);
+  });
+});

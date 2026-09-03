@@ -64,7 +64,71 @@ export function parseMoney(text: string): number | null {
   const bareDecimal = /(?:^|\s)([0-9][0-9,]*)[.,]([0-9]{2})(?=\s|$)/.exec(text);
   if (bareDecimal) return toCents(bareDecimal[1]!, bareDecimal[2]);
 
+  // Written out: "eighty dollars", "twenty five dollars", "a hundred bucks".
+  //
+  // Only with a currency word after it, for the same reason a bare "2" is not
+  // money: "two boxes of gloves" is a quantity, not two dollars.
+  //
+  // The words are collected by walking BACKWARDS from the currency word rather
+  // than by a regex reaching forwards, which would capture "i bought eighty"
+  // out of "I bought eighty dollars of milk" and fail to read a number from it.
+  const currency = /\b(?:dollars?|bucks|cad|usd)\b/i.exec(text);
+  if (currency) {
+    const before = text.slice(0, currency.index).toLowerCase()
+      .replace(/-/g, ' ').split(/\s+/).filter(Boolean);
+    const spelled: string[] = [];
+    for (let i = before.length - 1; i >= 0; i--) {
+      const w = before[i]!;
+      if (NUMBER_WORDS[w] !== undefined
+          || w === 'hundred' || w === 'thousand' || w === 'and' || w === 'a' || w === 'an') {
+        spelled.unshift(w);
+      } else break;
+    }
+    const n = spelled.length ? wordsToNumber(spelled.join(' ')) : null;
+    if (n !== null) return Math.round(n * 100);
+  }
+
   return null;
+}
+
+/**
+ * Numbers written as words: "eighty dollars", "twenty five", "a hundred".
+ *
+ * People say what they spent, they do not spell it in digits — "I bought eighty
+ * dollars of milk from Imtiaz" is an ordinary sentence and was reading as no
+ * amount at all, which then made it a note rather than a purchase and left it
+ * out of every total.
+ *
+ * Deliberately small: units, teens, tens, hundred and thousand. Anything more
+ * elaborate than "two thousand three hundred and fifty" is rare enough in a
+ * nursery's petty cash that asking is better than guessing.
+ */
+const NUMBER_WORDS: Record<string, number> = {
+  zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7,
+  eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, thirteen: 13,
+  fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18,
+  nineteen: 19, twenty: 20, thirty: 30, forty: 40, fourty: 40, fifty: 50,
+  sixty: 60, seventy: 70, eighty: 80, ninety: 90,
+};
+
+export function wordsToNumber(text: string): number | null {
+  const tokens = text.toLowerCase().replace(/-/g, ' ').split(/\s+/).filter(Boolean);
+  let total = 0, current = 0, seen = false;
+
+  for (const t of tokens) {
+    if (t === 'and' && seen) continue;
+    if (t === 'a' || t === 'an') { current = current || 1; seen = true; continue; }
+    const unit = NUMBER_WORDS[t];
+    if (unit !== undefined) { current += unit; seen = true; continue; }
+    if (t === 'hundred') { current = (current || 1) * 100; seen = true; continue; }
+    if (t === 'thousand') { total += (current || 1) * 1000; current = 0; seen = true; continue; }
+    // Any other word ends the number. "eighty dollars of milk" stops at
+    // "dollars" and does not wander into the rest of the sentence.
+    if (seen) break;
+  }
+  if (!seen) return null;
+  const value = total + current;
+  return value > 0 ? value : null;
 }
 
 function toCents(whole: string, frac?: string): number {
