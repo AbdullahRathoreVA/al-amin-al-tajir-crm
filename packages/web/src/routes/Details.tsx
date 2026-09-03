@@ -6,6 +6,9 @@ import {
   Panel, Badge, Button, Empty, Spinner, ErrorNote, When, clockTime, toneForStatus, NotMeasured,
 } from '../ui/kit.tsx';
 import { CompletenessPanel, DraftComposer, DraftHistory, FamilySummary } from '../ui/Compose.tsx';
+import { EditChild, EditGuardian, AddPerson } from '../ui/EditPerson.tsx';
+
+type Row = Record<string, string | number | null>;
 
 interface FamilyDetailData {
   family: Record<string, string | number | null>;
@@ -31,6 +34,12 @@ export function FamilyDetail() {
   const [tab, setTab] = useState<Tab>('Overview');
   const [note, setNote] = useState('');
   const [saving, setSaving] = useState(false);
+  // Editing is one dialog at a time on purpose: a row of inline inputs on a
+  // page this dense is how the wrong child's birthday gets changed.
+  const [editChild, setEditChild] = useState<Row | null>(null);
+  const [editGuardian, setEditGuardian] = useState<Row | null>(null);
+  const [adding, setAdding] = useState<'child' | 'guardian' | null>(null);
+  const me = useApi<{ capabilities: string[] }>('/auth/me');
 
   if (res.loading && !res.data) return <Spinner label="Loading family" />;
   if (res.error) return <ErrorNote error={res.error} retry={res.reload} />;
@@ -39,6 +48,7 @@ export function FamilyDetail() {
   const d = res.data;
   const f = d.family;
   const primary = d.guardians.find((g) => g.is_primary) ?? d.guardians[0];
+  const canWrite = me.data?.capabilities.includes('child:write') ?? false;
   const nextTask = d.tasks.find((t) => t.status === 'open' || t.status === 'doing');
   const openLead = d.leads[0];
 
@@ -128,8 +138,17 @@ export function FamilyDetail() {
       {tab === 'Overview' && (
         <div className="grid gap-4 lg:grid-cols-2">
           <div className="lg:col-span-2"><FamilySummary familyId={id} /></div>
-          <Panel title="Guardians" pad={false}>
-            {d.guardians.length === 0 ? <Empty title="No guardians recorded" /> : (
+          <Panel title="Guardians" pad={false}
+                 action={canWrite && (
+                   <Button size="sm" onClick={() => setAdding('guardian')}>+ Add</Button>
+                 )}>
+            {d.guardians.length === 0 ? (
+              <Empty title="No guardians recorded"
+                     hint="A family with no way to contact them cannot be followed up."
+                     action={canWrite
+                       ? <Button size="sm" onClick={() => setAdding('guardian')}>Add a guardian</Button>
+                       : undefined} />
+            ) : (
               <ul>
                 {d.guardians.map((g) => (
                   <li key={String(g.id)} className="border-b px-4 py-3 last:border-b-0" style={{ borderColor: 'var(--line)' }}>
@@ -137,6 +156,11 @@ export function FamilyDetail() {
                       <span className="font-medium">{String(g.first_name)} {String(g.last_name ?? '')}</span>
                       {g.is_primary === 1 && <Badge tone="gold">primary</Badge>}
                       {g.relationship && <span className="text-[12px]" style={{ color: 'var(--text-muted)' }}>{String(g.relationship)}</span>}
+                      {canWrite && (
+                        <button type="button" onClick={() => setEditGuardian(g)}
+                                className="ml-auto text-[12px] underline"
+                                style={{ color: 'var(--text-faint)' }}>Edit</button>
+                      )}
                     </div>
                     <div className="mt-1 flex flex-col gap-0.5 text-[12px]">
                       {g.phone && <a href={`tel:${String(g.phone)}`} className="hover:underline">{String(g.phone)}</a>}
@@ -170,13 +194,22 @@ export function FamilyDetail() {
       )}
 
       {tab === 'Children' && (
-        <Panel title="Children" pad={false}>
+        <Panel title="Children" pad={false}
+               action={canWrite && (
+                 <Button size="sm" onClick={() => setAdding('child')}>+ Add a child</Button>
+               )}>
           {!d.sensitiveVisible && (
             <p className="border-b px-4 py-2.5 text-[12px]" style={{ borderColor: 'var(--line)', color: 'var(--text-faint)' }}>
               Dates of birth are hidden for your role. Age bands are shown instead.
             </p>
           )}
-          {d.children.length === 0 ? <Empty title="No children recorded for this family" /> : (
+          {d.children.length === 0 ? (
+            <Empty title="No children recorded for this family"
+                   hint="An enquiry before a child is born is normal — add them when you know."
+                   action={canWrite
+                     ? <Button size="sm" onClick={() => setAdding('child')}>Add a child</Button>
+                     : undefined} />
+          ) : (
             <ul>
               {d.children.map((c) => (
                 <li key={String(c.id)} className="flex flex-wrap items-center gap-3 border-b px-4 py-3 last:border-b-0"
@@ -193,11 +226,30 @@ export function FamilyDetail() {
                     </span>
                   </span>
                   <Badge tone={toneForStatus(String(c.status))}>{String(c.status)}</Badge>
+                  {canWrite && (
+                    <button type="button" onClick={() => setEditChild(c)}
+                            className="text-[12px] underline" style={{ color: 'var(--text-faint)' }}>
+                      Edit
+                    </button>
+                  )}
                 </li>
               ))}
             </ul>
           )}
         </Panel>
+      )}
+
+      {editChild && (
+        <EditChild child={editChild} canSeeDob={d.sensitiveVisible}
+                   onClose={() => setEditChild(null)} onSaved={res.reload} />
+      )}
+      {editGuardian && (
+        <EditGuardian guardian={editGuardian}
+                      onClose={() => setEditGuardian(null)} onSaved={res.reload} />
+      )}
+      {adding && (
+        <AddPerson familyId={id} kind={adding}
+                   onClose={() => setAdding(null)} onSaved={res.reload} />
       )}
 
       {tab === 'Timeline' && <Timeline events={d.timeline} />}
