@@ -38,6 +38,7 @@ interface ProgramStanding {
 interface Data {
   entries: Entry[]; programs: ProgramStanding[];
   staleAfterDays: number; defaultOfferDays: number;
+  orderingPolicy: string;
 }
 
 export function Waitlist({ canWrite }: { canWrite: boolean }) {
@@ -66,7 +67,10 @@ export function Waitlist({ canWrite }: { canWrite: boolean }) {
       <header>
         <h1 className="text-xl font-semibold tracking-tight">Waiting list</h1>
         <p className="mt-0.5 text-[13px]" style={{ color: 'var(--text-muted)' }}>
-          In the order families joined. Nobody is moved up without somebody deciding to.
+          {/* Stated on the screen, not just in a policy document nobody opens.
+              A waiting list only feels fair if the rule can be repeated to a
+              parent on the phone, word for word. */}
+          {d?.orderingPolicy ?? 'In the order families joined.'}
         </p>
       </header>
 
@@ -200,10 +204,11 @@ export function Waitlist({ canWrite }: { canWrite: boolean }) {
                   <span className="min-w-0 flex-1">
                     <span className="flex flex-wrap items-center gap-2">
                       <strong className="text-[13px]">{e.childName ?? e.familyName}</strong>
-                      {/* A fact, not a rule. Whether a sibling jumps the queue is
-                          the centre's policy; the CRM only makes sure whoever
-                          decides can see they are deciding. */}
-                      {e.hasSiblingHere && <Badge tone="info">sibling here</Badge>}
+                      {/* Shown because it is useful to know you already have
+                          this family on the phone. It changes nothing about
+                          their place: the centre's policy is strict order of
+                          joining, and the list is sorted on nothing else. */}
+                      {e.hasSiblingHere && <Badge tone="neutral">already with us</Badge>}
                       {e.isStale && <Badge tone="warn">not heard from</Badge>}
                     </span>
                     <span className="block text-[12px]" style={{ color: 'var(--text-muted)' }}>

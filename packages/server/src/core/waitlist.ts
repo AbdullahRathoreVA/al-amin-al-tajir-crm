@@ -27,9 +27,29 @@ import { createTask, notify } from './notify.ts';
 
 export class WaitlistError extends Error {}
 
-/** How long a family has to answer an offer, unless told otherwise. Two weeks
- *  is long enough to talk it over and short enough that a place is not held
- *  hostage. It is an argument, not a law. */
+/**
+ * THE CENTRE'S WAITING LIST POLICY, decided 2026-09-04.
+ *
+ * Strict order of joining. Siblings do NOT move up the queue.
+ *
+ * This is written down because the research on childcare waitlists is blunt
+ * about it: most centres run a hybrid by accident — a sibling here, a
+ * full-timer there — and then cannot explain to a parent why somebody who
+ * joined in June was offered a place before somebody who joined in March. A
+ * policy only feels fair if it can be stated in one sentence, and this one can.
+ *
+ * The consequence for this file is that `list()` orders by added_at and by
+ * nothing else. `hasSiblingHere` is still computed and still shown, because it
+ * is useful to know you already have that family on the phone — but it is a
+ * fact about them, not a lever, and there is a test that proves it moves
+ * nobody.
+ */
+export const ORDERING_POLICY =
+  'Strict order of joining. Siblings do not move up the queue.';
+
+/** How long a family has to answer an offer. Two weeks: long enough to talk it
+ *  over, short enough that a place is not held hostage. Confirmed by the centre
+ *  on 2026-09-04. */
 export const DEFAULT_OFFER_DAYS = 14;
 
 /** The research says refresh every three to six months. Three, because the
@@ -65,10 +85,9 @@ const days = (from: string | null, to = Date.now()): number | null => {
 /**
  * The list, in order, with a position per program.
  *
- * Ordering is application date within a program, which is the only ordering
- * that needs no policy decision and no explaining. Anything else — siblings
- * first, full-timers first — is a judgement somebody makes on top of this,
- * with the facts in front of them.
+ * Ordering is application date within a program and nothing else. That is the
+ * centre's policy, not a default this file fell into — see ORDERING_POLICY
+ * above. Siblings are shown, never sorted on.
  */
 export function list(opts: { programId?: string; status?: string } = {}): WaitlistEntry[] {
   const where = ["w.status <> 'removed'"];

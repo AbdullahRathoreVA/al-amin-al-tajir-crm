@@ -44,7 +44,8 @@ const { parseTabular } = await import('../packages/server/src/core/csv.ts');
 const { refreshAgeBands, outgrown, upcomingBirthdays, progressionSummary, placementPlan } =
   await import('../packages/server/src/core/progression.ts');
 const { list: wlList, join: wlJoin, offer: wlOffer, accept: wlAccept, decline: wlDecline,
-        sweep: wlSweep, programStanding } = await import('../packages/server/src/core/waitlist.ts');
+        sweep: wlSweep, programStanding, ORDERING_POLICY, DEFAULT_OFFER_DAYS } =
+  await import('../packages/server/src/core/waitlist.ts');
 const { familiesWorkbook, admissionsWorkbook, deFormula, exportCounts } =
   await import('../packages/server/src/core/exports.ts');
 const { HELP, HELP_SECTIONS, searchHelp, topicsAsContext } =
@@ -3277,6 +3278,35 @@ describe('the waiting list', () => {
     // back is not a thing software should do on a timer.
     assert.equal(one<{ status: string }>(
       'SELECT status FROM waitlist WHERE id = ?', String(entry.id))?.status, 'offered');
+  });
+
+  test('a sibling already attending does NOT move a family up', () => {
+    // The centre's policy, decided 2026-09-04: strict order of joining. This
+    // test exists so nobody quietly reintroduces sibling priority and then
+    // cannot explain to a March applicant why June went first.
+    const p = prog('twinkle-stars');
+    const first = insertFamily('Stranger family', 'manual', null, A);
+    wlJoin({ familyId: first, programId: p }, A);
+
+    // A family who already has a child enrolled here, joining second.
+    const second = insertFamily('Insider family', 'manual', null, A);
+    const kid = addChild(second, { firstName: 'Alreadyhere' }, A);
+    execSql("UPDATE children SET status = 'enrolled' WHERE id = ?", kid);
+    wlJoin({ familyId: second, programId: p }, A);
+
+    const list = wlList({ programId: p });
+    assert.equal(list[0]?.familyName, 'Stranger family', 'joined first, so first');
+    assert.equal(list[1]?.familyName, 'Insider family');
+    assert.equal(list[1]?.hasSiblingHere, true, 'the fact is still shown');
+    assert.equal(list[1]?.position, 2, 'but it moves them nowhere');
+  });
+
+  test('the ordering policy is stated, not implied', () => {
+    // The research is blunt: a policy only feels fair if it can be said in one
+    // sentence to a parent. So it is a value the screen renders, not a comment.
+    assert.match(ORDERING_POLICY, /order of joining/i);
+    assert.match(ORDERING_POLICY, /siblings do not/i);
+    assert.equal(DEFAULT_OFFER_DAYS, 14);
   });
 
   test('places free comes from the licensed capacity, not a guess', () => {

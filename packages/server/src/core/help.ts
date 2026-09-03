@@ -417,6 +417,7 @@ export const HELP: HelpTopic[] = [
     title: 'The waiting list',
     summary: 'Who is waiting, in the order they joined, and who is about to be forgotten.',
     body: [
+      'The centre’s policy is strict order of joining, and siblings do not move up the queue. That sentence is printed at the top of the screen so it can be repeated to a parent word for word.',
       'Families sit in the order they joined, within each age group. The number beside a family is their position, and it is worked out fresh every time you open the screen — a saved position would be wrong the moment somebody in the middle left.',
       'The four numbers at the top are the ones that matter: waiting, offered a place, past the deadline, and not heard from. The last two are the whole point of the screen.',
       '"Places, by age group" shows the licensed number, how many children are enrolled, and therefore how many places are actually free. Those are counts, not predictions.',
@@ -426,13 +427,13 @@ export const HELP: HelpTopic[] = [
     steps: [
       'Open the Waiting list.',
       'Deal with anything under "past the deadline" first — those places cannot go to anybody else.',
-      'To offer a place, press "Offer a place" and set how many days they have to answer.',
+      'To offer a place, press "Offer a place". Fourteen days to answer is the centre’s standard; change it if a particular family needs longer.',
       'When they reply, press "They accepted" or "They said no".',
       'Press "Checked in" whenever you speak to a waiting family. That is what stops them going stale.',
     ],
     notes: [
       'There is no estimated waiting time, on purpose. Nobody can know when a place will free up, and a number on this screen becomes a promise on the phone.',
-      '"Sibling here" means that family already has a child attending. It is shown as a fact, not applied as a rule — whether siblings go first is the centre’s policy, and whoever moves somebody up should be able to see they are the one doing it.',
+      '"Already with us" means that family has a child attending. It is shown because it is useful to know before you ring them, and it changes nothing about their place — the list is sorted on the date they joined and on nothing else.',
       'A family can turn an offer down and stay on the list, keeping their place. That is for the parent who wanted September and was offered June.',
       'Saying why a family declined is required. It is the only way anybody learns why places go unfilled.',
       'Nobody is removed automatically. An expired offer becomes a phone call, not a withdrawal.',

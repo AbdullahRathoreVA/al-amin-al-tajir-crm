@@ -11,7 +11,8 @@ import { findFamilyMatches } from './core/match.ts';
 import { progressionSummary, placementPlan } from './core/progression.ts';
 import { list as wlList, join as wlJoin, offer as wlOffer, accept as wlAccept,
          decline as wlDecline, recordContact as wlContact, programStanding,
-         WaitlistError, STALE_AFTER_DAYS, DEFAULT_OFFER_DAYS } from './core/waitlist.ts';
+         WaitlistError, STALE_AFTER_DAYS, DEFAULT_OFFER_DAYS,
+         ORDERING_POLICY } from './core/waitlist.ts';
 import { familiesWorkbook, admissionsWorkbook, exportCounts } from './core/exports.ts';
 import { HELP, HELP_SECTIONS, searchHelp, topicsAsContext } from './core/help.ts';
 import {
@@ -1436,6 +1437,7 @@ router.get('/api/v1/waitlist', (c) => {
     programs: programStanding(),
     staleAfterDays: STALE_AFTER_DAYS,
     defaultOfferDays: DEFAULT_OFFER_DAYS,
+    orderingPolicy: ORDERING_POLICY,
   };
 });
 
