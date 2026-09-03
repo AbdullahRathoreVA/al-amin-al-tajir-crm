@@ -15,7 +15,11 @@ import {
   insertFamily, upsertGuardian, addChild, addGuardian, updateChild, updateGuardian,
   reindexFamily, type ChildPatch, type GuardianPatch,
 } from './core/people.ts';
-import { login, logout, capabilitiesFor, canSeeSensitive, can, sessionsFor, revokeSession } from './core/auth.ts';
+import {
+  login, logout, capabilitiesFor, canSeeSensitive, can, sessionsFor, revokeSession,
+  changeOwnPassword, resetPasswordFor, setUserStatus, setUserRole, listUsers, emailTaken,
+  createUser, AccountError, MIN_PASSWORD, ROLE_NAMES, type Role,
+} from './core/auth.ts';
 import { recordEvent, familyTimeline, timelineFor, changesSince, diff, logAccess, historyOf, type Actor } from './core/events.ts';
 import { search as fullTextSearch, indexEntity, familyForRelated, type Indexable } from './core/search.ts';
 import { notify, unreadFor, setNotificationState, createTask, completeTask } from './core/notify.ts';
@@ -111,6 +115,53 @@ router.post('/api/v1/auth/login', (c) => {
   c.setCookie('crm_session', result.token, { expires: result.expiresAt });
   logAccess(result.user.id, 'login');
   return { user: result.user, capabilities: capabilitiesFor(result.user.role) };
+}, { anonymous: true });
+
+/**
+ * Changing your own password, from the app.
+ *
+ * Until this existed the only way was over SSH, which meant in practice nobody
+ * ever did it — the one security action every user needs was the one that
+ * required a developer. It is also why a placeholder password can survive on a
+ * live system: rotating it was too hard to bother with.
+ */
+router.post('/api/v1/auth/password', (c) => {
+  const b = requireBody<{ currentPassword?: string; newPassword?: string }>(c);
+  try {
+    const r = changeOwnPassword(
+      c.user!.id, b.currentPassword ?? '', b.newPassword ?? '', c.cookies.crm_session,
+    );
+    logAccess(c.user!.id, 'password_changed');
+    return { ok: true, signedOut: r.signedOut };
+  } catch (err) {
+    if (err instanceof AccountError) throw badRequest(err.message);
+    throw err;
+  }
+});
+
+/**
+ * What "forgotten password" means for a nursery.
+ *
+ * There is no mail server, there are a handful of staff, and the manager is in
+ * the building. So this tells the person exactly who can reset it for them,
+ * by name, rather than showing a form that sends an email nothing can deliver.
+ *
+ * Anonymous by necessity — the person cannot sign in. It therefore returns
+ * only names and roles of people who can help, never an email address or
+ * anything that would let somebody enumerate accounts.
+ */
+router.get('/api/v1/auth/recover', () => {
+  const helpers = many<{ name: string; role: string }>(
+    `SELECT name, role FROM users
+      WHERE status = 'active' AND role IN ('owner','director')
+      ORDER BY CASE role WHEN 'owner' THEN 0 ELSE 1 END, name LIMIT 5`);
+  return {
+    canResetForYou: helpers,
+    // Said plainly rather than implying a self-service flow exists.
+    how: helpers.length
+      ? 'Ask one of these people to reset it for you. They do it from "Your account" in under a minute.'
+      : 'No manager account is active. Whoever installed the CRM can reset it from the command line.',
+  };
 }, { anonymous: true });
 
 router.post('/api/v1/auth/logout', (c) => {
@@ -1291,6 +1342,78 @@ router.post('/api/v1/help/ask', async (c) => {
       ? `Written by ${ai.name} from the guide only. Check the topics below if in doubt.`
       : 'The AI provider did not answer. These are the matching parts of the guide.',
   };
+});
+
+// ---------------------------------------------------------------- accounts
+//
+// Managing staff accounts from the app rather than over SSH. The CLI still
+// exists and is still the way to create the very first account — there has to
+// be a way in before there is anybody to sign in as.
+
+router.get('/api/v1/users', (c) => {
+  c.require('user:manage');
+  return { users: plainAll(listUsers()), minPassword: MIN_PASSWORD, roles: ROLE_NAMES };
+});
+
+router.post('/api/v1/users', (c) => {
+  c.require('user:manage');
+  const b = requireBody<{ email?: string; name?: string; role?: string; password?: string }>(c);
+  const email = (b.email ?? '').trim().toLowerCase();
+  const name = (b.name ?? '').trim();
+  if (!email) throw badRequest('An email address or username is required');
+  if (!name) throw badRequest('A name is required');
+  if (!ROLE_NAMES.includes(b.role as Role)) throw badRequest(`Role must be one of: ${ROLE_NAMES.join(', ')}`);
+  if (emailTaken(email)) throw badRequest(`"${email}" already has an account.`);
+  if ((b.password ?? '').length < MIN_PASSWORD) {
+    throw badRequest(`A password needs at least ${MIN_PASSWORD} characters.`);
+  }
+
+  const created = createUser(email, name, b.role as Role, b.password!);
+  logAccess(c.user!.id, 'user_created', 'user', created.id, `${email} as ${b.role}`);
+  return plain(created as unknown as Record<string, unknown>);
+});
+
+/** A manager resetting somebody's password. This is the real answer to
+ *  "I have forgotten mine". */
+router.post('/api/v1/users/:id/password', (c) => {
+  c.require('user:manage');
+  const b = requireBody<{ password?: string }>(c);
+  try {
+    const r = resetPasswordFor(c.params.id!, b.password ?? '');
+    logAccess(c.user!.id, 'password_reset', 'user', c.params.id, `${r.email}, ${r.signedOut} session(s) ended`);
+    return { ok: true, ...r };
+  } catch (err) {
+    if (err instanceof AccountError) throw badRequest(err.message);
+    throw err;
+  }
+});
+
+router.patch('/api/v1/users/:id', (c) => {
+  c.require('user:manage');
+  const id = c.params.id!;
+  const b = requireBody<{ status?: string; role?: string }>(c);
+
+  // Locking yourself out of the only owner account is unrecoverable from
+  // inside the app, so it is refused here rather than regretted later.
+  if (id === c.user!.id && (b.status === 'suspended' || (b.role && b.role !== c.user!.role))) {
+    throw badRequest('You cannot suspend or change the role of the account you are signed in with.');
+  }
+
+  try {
+    if (b.status === 'active' || b.status === 'suspended') {
+      setUserStatus(id, b.status);
+      logAccess(c.user!.id, 'user_status', 'user', id, b.status);
+    }
+    if (b.role) {
+      if (!ROLE_NAMES.includes(b.role as Role)) throw badRequest(`Unknown role "${b.role}"`);
+      setUserRole(id, b.role as Role);
+      logAccess(c.user!.id, 'user_role', 'user', id, b.role);
+    }
+  } catch (err) {
+    if (err instanceof AccountError) throw badRequest(err.message);
+    throw err;
+  }
+  return plain(one('SELECT id,email,name,role,status,created_at,last_login_at FROM users WHERE id = ?', id));
 });
 
 router.get('/api/v1/progression', (c) => {

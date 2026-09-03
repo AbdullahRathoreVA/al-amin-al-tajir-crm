@@ -18,10 +18,11 @@ import { createInterface } from 'node:readline';
 import { connect, one, many, run } from '../db/index.ts';
 import { migrateUp } from '../db/migrate.ts';
 import { nowIso, newId } from '../core/util.ts';
-import { hashPassword, capabilitiesFor, type Role } from '../core/auth.ts';
+import { hashPassword, capabilitiesFor, ROLE_NAMES, type Role } from '../core/auth.ts';
 import { recordEvent, SYSTEM } from '../core/events.ts';
 
-const ROLES: Role[] = ['owner', 'director', 'admissions', 'educator', 'accounting', 'readonly'];
+// One definition, shared with the app. See core/auth.ts.
+const ROLES = ROLE_NAMES;
 
 const MIN_PASSWORD = 12;
 

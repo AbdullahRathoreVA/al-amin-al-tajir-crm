@@ -178,6 +178,15 @@ const ROLES: Record<Role, Capability[]> = {
   ],
 };
 
+/**
+ * Every role name, read from the capability map rather than typed out again.
+ *
+ * `seed/users.ts` had its own copy of this list, which is exactly the kind of
+ * duplication that leaves a new role usable from the command line and rejected
+ * by the app for a week before anybody notices.
+ */
+export const ROLE_NAMES = Object.keys(ROLES) as Role[];
+
 export function can(user: Pick<User, 'role'> | null, cap: Capability): boolean {
   if (!user) return false;
   return ROLES[user.role]?.includes(cap) ?? false;
@@ -188,4 +197,108 @@ export function capabilitiesFor(role: Role): Capability[] { return ROLES[role] ?
 /** Roles that may see a date of birth. Everyone else gets the age band. */
 export function canSeeSensitive(user: User | null): boolean {
   return can(user, 'child:read_sensitive');
+}
+
+// ------------------------------------------------------------ account admin
+//
+// Changing a password had to be done over SSH, which meant in practice it was
+// never done: the one security action every user needs was the one action that
+// required a developer. These are the same operations the CLI performs, with
+// the checks that only make sense when a person is signed in.
+
+/** The rule the CLI already enforces. One definition, not two. */
+export const MIN_PASSWORD = 12;
+
+export class AccountError extends Error {}
+
+function assertPasswordOk(pw: unknown): string {
+  if (typeof pw !== 'string' || pw.length < MIN_PASSWORD) {
+    throw new AccountError(`A password needs at least ${MIN_PASSWORD} characters.`);
+  }
+  if (pw.length > 200) throw new AccountError('That password is too long.');
+  return pw;
+}
+
+/** Signs out every session for a user. Used whenever a password changes:
+ *  a stolen session has to die with the password that created it. */
+export function revokeAllSessions(userId: string, exceptToken?: string | null): number {
+  const except = exceptToken ? sha256(exceptToken) : null;
+  return run(
+    `UPDATE sessions SET revoked_at = ?
+      WHERE user_id = ? AND revoked_at IS NULL ${except ? 'AND token_hash <> ?' : ''}`,
+    ...(except ? [nowIso(), userId, except] : [nowIso(), userId]),
+  ).changes;
+}
+
+/**
+ * Changing your own password.
+ *
+ * The current password is required even though the caller is already signed
+ * in. Without it, an unlocked laptop in a staff room is a permanent account
+ * takeover; with it, the attacker needs the thing they do not have.
+ */
+export function changeOwnPassword(
+  userId: string, currentPassword: string, newPassword: string, keepToken?: string | null,
+): { signedOut: number } {
+  const row = one<{ password_hash: string }>('SELECT password_hash FROM users WHERE id = ?', userId);
+  if (!row) throw new AccountError('No such account');
+  if (!verifyPassword(currentPassword ?? '', row.password_hash)) {
+    throw new AccountError('That is not your current password.');
+  }
+  const next = assertPasswordOk(newPassword);
+  if (verifyPassword(next, row.password_hash)) {
+    throw new AccountError('That is the password you already have.');
+  }
+  run('UPDATE users SET password_hash = ? WHERE id = ?', hashPassword(next), userId);
+  // Every other device is signed out; the one doing the changing stays in,
+  // because signing somebody out of the screen they are looking at is hostile.
+  return { signedOut: revokeAllSessions(userId, keepToken) };
+}
+
+/**
+ * A manager resetting somebody else's password.
+ *
+ * This is what "forgotten password" actually means for a nursery: there is no
+ * email server, there are eight members of staff, and the manager is in the
+ * building. Every session of the target account is ended.
+ */
+export function resetPasswordFor(
+  targetUserId: string, newPassword: string,
+): { email: string; signedOut: number } {
+  const row = one<{ id: string; email: string }>('SELECT id, email FROM users WHERE id = ?', targetUserId);
+  if (!row) throw new AccountError('No such account');
+  const next = assertPasswordOk(newPassword);
+  run('UPDATE users SET password_hash = ? WHERE id = ?', hashPassword(next), targetUserId);
+  return { email: row.email, signedOut: revokeAllSessions(targetUserId) };
+}
+
+export function setUserStatus(userId: string, status: 'active' | 'suspended'): void {
+  const row = one<{ id: string }>('SELECT id FROM users WHERE id = ?', userId);
+  if (!row) throw new AccountError('No such account');
+  run('UPDATE users SET status = ? WHERE id = ?', status, userId);
+  // A suspended account keeps no live sessions, or suspending it does nothing
+  // until whoever is signed in happens to close their browser.
+  if (status === 'suspended') revokeAllSessions(userId);
+}
+
+export function setUserRole(userId: string, role: Role): void {
+  if (!(role in ROLES)) throw new AccountError(`Unknown role "${role}".`);
+  const row = one<{ id: string }>('SELECT id FROM users WHERE id = ?', userId);
+  if (!row) throw new AccountError('No such account');
+  run('UPDATE users SET role = ? WHERE id = ?', role, userId);
+  // Capabilities are read from the role at request time, but an open session
+  // holding a stale idea of what it may do is not worth the risk.
+  revokeAllSessions(userId);
+}
+
+export function listUsers(): (User & { sessions: number })[] {
+  return many<User & { sessions: number }>(
+    `SELECT u.id, u.email, u.name, u.role, u.status, u.created_at, u.last_login_at,
+            (SELECT COUNT(*) FROM sessions s
+              WHERE s.user_id = u.id AND s.revoked_at IS NULL AND s.expires_at > ?) AS sessions
+       FROM users u ORDER BY u.role, u.email`, nowIso());
+}
+
+export function emailTaken(email: string): boolean {
+  return Boolean(one('SELECT id FROM users WHERE email = ?', email.trim().toLowerCase()));
 }

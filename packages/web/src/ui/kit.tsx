@@ -1,4 +1,4 @@
-import { useEffect, useRef, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 
 // ------------------------------------------------------------------- layout
 
@@ -342,6 +342,43 @@ export function Modal(
           </footer>
         )}
       </div>
+    </div>
+  );
+}
+
+/**
+ * A password box with a show/hide button.
+ *
+ * People mistype passwords, especially long ones on a phone keyboard, and the
+ * usual response is to pick a shorter password. Letting somebody see what they
+ * typed is the cheapest way to make a strong password bearable.
+ *
+ * The button is a real button with a label that changes, not an icon: a
+ * screen reader has to be able to say what it does and what state it is in.
+ */
+export function PasswordInput(
+  { id, ...rest }: React.InputHTMLAttributes<HTMLInputElement>,
+) {
+  const [shown, setShown] = useState(false);
+  return (
+    <div className="relative">
+      <input
+        {...rest}
+        id={id}
+        type={shown ? 'text' : 'password'}
+        className={`${inputClass} pr-16 ${rest.className ?? ''}`}
+        style={{ ...inputStyle, ...rest.style }}
+      />
+      <button
+        type="button"
+        onClick={() => setShown((s) => !s)}
+        aria-pressed={shown}
+        aria-controls={id}
+        className="absolute right-1 top-1 bottom-1 rounded-md px-2.5 text-[11px] font-medium"
+        style={{ color: 'var(--text-muted)', background: 'var(--surface-inset)' }}
+      >
+        {shown ? 'Hide' : 'Show'}
+      </button>
     </div>
   );
 }

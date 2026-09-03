@@ -141,20 +141,40 @@ export const FIELD_LABELS: Record<ImportField, string> = {
   status: 'Status',
 };
 
-/** Header names really seen in nursery spreadsheets, lowercased and stripped. */
+/**
+ * Header names really seen in nursery spreadsheets, lowercased and stripped.
+ *
+ * The Lillio names are in here deliberately. Lillio (formerly HiMama) publishes
+ * no API — its own help pages point you at Reports -> Child Profile Report ->
+ * Run Export, which produces a CSV. So the working path from Lillio into this
+ * CRM is that export, and the least this can do is recognise its columns
+ * without anybody mapping them by hand.
+ *
+ * If Lillio ever grants API access, the connector replaces this and the aliases
+ * stay harmless. Until then, guessing the columns IS the integration.
+ */
 const ALIASES: Record<ImportField, string[]> = {
-  guardianName: ['parentname', 'guardianname', 'parent', 'guardian', 'name', 'contactname', 'fullname', 'mother', 'father'],
-  guardianEmail: ['email', 'parentemail', 'guardianemail', 'emailaddress', 'contactemail', 'e-mail'],
-  guardianPhone: ['phone', 'parentphone', 'guardianphone', 'mobile', 'cell', 'telephone', 'contactnumber', 'phonenumber'],
+  guardianName: ['parentname', 'guardianname', 'parent', 'guardian', 'name', 'contactname', 'fullname', 'mother', 'father',
+    // Lillio
+    'primarycontact', 'primaryparent', 'parent1name', 'parentguardianname', 'guardian1'],
+  guardianEmail: ['email', 'parentemail', 'guardianemail', 'emailaddress', 'contactemail', 'e-mail',
+    'primarycontactemail', 'parent1email', 'guardianemailaddress'],
+  guardianPhone: ['phone', 'parentphone', 'guardianphone', 'mobile', 'cell', 'telephone', 'contactnumber', 'phonenumber',
+    'primarycontactphone', 'parent1phone', 'homephone', 'mobilephone'],
   guardianRelationship: ['relationship', 'relation', 'parenttype'],
-  childFirstName: ['childname', 'childfirstname', 'child', 'firstname', 'childsname', 'kidname'],
-  childLastName: ['childlastname', 'lastname', 'surname', 'familyname'],
-  childDob: ['dob', 'dateofbirth', 'birthdate', 'birthday', 'childdob'],
+  childFirstName: ['childname', 'childfirstname', 'child', 'firstname', 'childsname', 'kidname',
+    'studentfirstname', 'studentname', 'childfirst'],
+  childLastName: ['childlastname', 'lastname', 'surname', 'familyname',
+    'studentlastname', 'childlast'],
+  childDob: ['dob', 'dateofbirth', 'birthdate', 'birthday', 'childdob',
+    'studentdateofbirth', 'childdateofbirth', 'birthdatemmddyyyy'],
   childAgeBand: ['ageband', 'age', 'agegroup', 'agerange'],
-  program: ['program', 'programme', 'room', 'class', 'classroom', 'programinterest'],
-  desiredStart: ['startdate', 'desiredstart', 'start', 'preferredstart', 'enrolmentdate', 'enrollmentdate'],
+  program: ['program', 'programme', 'room', 'class', 'classroom', 'programinterest',
+    'group', 'currentroom', 'enrolledroom', 'classroomname'],
+  desiredStart: ['startdate', 'desiredstart', 'start', 'preferredstart', 'enrolmentdate', 'enrollmentdate',
+    'enrollmentstartdate', 'startingdate', 'admissiondate'],
   notes: ['notes', 'note', 'comments', 'comment', 'questions', 'message'],
-  status: ['status', 'stage', 'leadstatus'],
+  status: ['status', 'stage', 'leadstatus', 'childstatus', 'enrollmentstatus', 'studentstatus'],
 };
 
 const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');

@@ -13,6 +13,7 @@ import { Automations } from './routes/Automations.tsx';
 import { Attendance } from './routes/Attendance.tsx';
 import { Logbook } from './routes/Logbook.tsx';
 import { Help } from './routes/Help.tsx';
+import { Account } from './routes/Account.tsx';
 
 /**
  * `cap` hides an entry from roles that cannot use it. Only the register is
@@ -33,6 +34,7 @@ const NAV: { to: string; label: string; glyph: string; cap?: string }[] = [
   { to: '/import', label: 'Import', glyph: '⤓' },
   { to: '/system', label: 'System', glyph: '⚙' },
   { to: '/help', label: 'Help', glyph: '?' },
+  { to: '/account', label: 'Your account', glyph: '◎' },
 ];
 
 // What a phone actually needs. The register is on it because marking children
@@ -70,6 +72,8 @@ function Login({ onSignedIn }: { onSignedIn: () => void }) {
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [recover, setRecover] = useState(false);
+  const [showPw, setShowPw] = useState(false);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -85,6 +89,8 @@ function Login({ onSignedIn }: { onSignedIn: () => void }) {
 
   const field = 'w-full rounded-lg border px-3 py-2.5 text-sm outline-none';
   const fieldStyle = { borderColor: 'var(--line-strong)', background: 'var(--surface-sunken)', color: 'var(--text)' };
+
+  if (recover) return <Recover onBack={() => setRecover(false)} />;
 
   return (
     <div className="cst-stage grid min-h-full place-items-center p-5">
@@ -106,9 +112,17 @@ function Login({ onSignedIn }: { onSignedIn: () => void }) {
                className={`${field} mb-3`} style={fieldStyle} />
 
         <label className="mb-1 block text-[12px] font-medium" htmlFor="password">Password</label>
-        <input id="password" type="password" required autoComplete="current-password"
-               value={password} onChange={(e) => setPassword(e.target.value)}
-               className={field} style={fieldStyle} />
+        <div className="relative">
+          <input id="password" type={showPw ? 'text' : 'password'} required autoComplete="current-password"
+                 value={password} onChange={(e) => setPassword(e.target.value)}
+                 className={`${field} pr-16`} style={fieldStyle} />
+          <button type="button" onClick={() => setShowPw((v) => !v)} aria-pressed={showPw}
+                  aria-controls="password"
+                  className="absolute right-1 top-1 bottom-1 rounded-md px-2.5 text-[11px] font-medium"
+                  style={{ color: 'var(--text-muted)', background: 'var(--surface-inset)' }}>
+            {showPw ? 'Hide' : 'Show'}
+          </button>
+        </div>
 
         {error && (
           <p className="mt-3 rounded-lg px-3 py-2 text-[13px]"
@@ -121,8 +135,56 @@ function Login({ onSignedIn }: { onSignedIn: () => void }) {
           {busy ? 'Signing in…' : 'Sign in'}
         </Button>
 
-
+        <button type="button" onClick={() => setRecover(true)}
+                className="mt-3 w-full text-center text-[12px] underline"
+                style={{ color: 'var(--text-faint)' }}>
+          Forgotten your password?
+        </button>
       </form>
+    </div>
+  );
+}
+
+/**
+ * "Forgotten your password?"
+ *
+ * There is no mail server here, and there are a handful of staff. So rather
+ * than a form that emails a link nothing can deliver, this names the people who
+ * can actually reset it — which for a nursery is the manager, who is in the
+ * building. It is deliberately anonymous and returns names and roles only,
+ * never an email address, so it cannot be used to discover accounts.
+ */
+function Recover({ onBack }: { onBack: () => void }) {
+  const res = useApi<{ canResetForYou: { name: string; role: string }[]; how: string }>(
+    '/auth/recover');
+
+  return (
+    <div className="cst-stage grid min-h-full place-items-center p-5">
+      <div className="panel w-full max-w-sm p-6">
+        <h1 className="text-lg font-semibold tracking-tight">Forgotten your password?</h1>
+        <p className="mt-2 text-[13px]" style={{ color: 'var(--text-muted)' }}>
+          {res.data?.how ?? 'Checking who can help…'}
+        </p>
+
+        {res.data && res.data.canResetForYou.length > 0 && (
+          <ul className="mt-3 flex flex-col gap-1.5">
+            {res.data.canResetForYou.map((p) => (
+              <li key={p.name} className="rounded-lg px-3 py-2 text-[13px]"
+                  style={{ background: 'var(--surface-inset)' }}>
+                <strong>{p.name}</strong>{' '}
+                <span style={{ color: 'var(--text-faint)' }}>({p.role})</span>
+              </li>
+            ))}
+          </ul>
+        )}
+
+        <p className="mt-3 text-[11px]" style={{ color: 'var(--text-faint)' }}>
+          Nobody can look up your existing password &mdash; passwords are stored
+          scrambled on purpose. It can only be replaced with a new one.
+        </p>
+
+        <Button className="mt-4 w-full" onClick={onBack}>Back to sign in</Button>
+      </div>
     </div>
   );
 }
@@ -179,8 +241,12 @@ function Shell({ me, onSignedOut }: { me: Me; onSignedOut: () => void }) {
         </nav>
 
         <div className="mt-3 border-t pt-3" style={{ borderColor: 'var(--line)' }}>
-          <p className="px-3 text-[12px] font-medium">{me.user.name}</p>
-          <p className="px-3 text-[11px]" style={{ color: 'var(--text-faint)' }}>{me.user.role}</p>
+          <Link to="/account" className="block rounded-lg px-3 py-1 hover:underline">
+            <span className="block text-[12px] font-medium">{me.user.name}</span>
+            <span className="block text-[11px]" style={{ color: 'var(--text-faint)' }}>
+              {me.user.role} &middot; account
+            </span>
+          </Link>
           <div className="mt-2 flex gap-1 px-1">
             <Button size="sm" variant="ghost" onClick={toggleTheme}>{dark ? 'Light' : 'Dark'}</Button>
             <Button size="sm" variant="ghost" onClick={signOut}>Sign out</Button>
@@ -224,7 +290,7 @@ function Shell({ me, onSignedOut }: { me: Me; onSignedOut: () => void }) {
         )}
 
         <main className="min-w-0 flex-1 px-4 py-5 pb-24 lg:px-6 lg:pb-8">
-          <Routes userName={me.user.name} />
+          <Routes me={me} onSignedOut={onSignedOut} />
         </main>
 
         {/* -------------------------------------------------- mobile bottom nav */}
@@ -251,9 +317,9 @@ function Shell({ me, onSignedOut }: { me: Me; onSignedOut: () => void }) {
   );
 }
 
-function Routes({ userName }: { userName: string }) {
+function Routes({ me, onSignedOut }: { me: Me; onSignedOut: () => void }) {
   const { path } = useRouter();
-  if (path === '/') return <Dashboard userName={userName} />;
+  if (path === '/') return <Dashboard userName={me.user.name} />;
   if (path === '/families') return <Families />;
   if (path.startsWith('/families/')) return <FamilyDetail />;
   if (path === '/leads') return <Leads />;
@@ -268,6 +334,7 @@ function Routes({ userName }: { userName: string }) {
   if (path === '/automations') return <Automations />;
   if (path === '/system' || path === '/programs') return <System />;
   if (path === '/help') return <Help />;
+  if (path === '/account') return <Account me={me} onSignedOut={onSignedOut} />;
   return (
     <Panel><div className="py-8 text-center">
       <p className="text-sm font-medium">This page does not exist.</p>
@@ -368,6 +435,8 @@ const ACTIONS = [
   { label: 'Possible duplicate families', to: '/families?filter=duplicates' },
   { label: 'System health', to: '/system' },
   { label: 'Help: how do I…', to: '/help' },
+  { label: 'Change my password', to: '/account' },
+  { label: 'Staff accounts', to: '/account' },
 ];
 
 function CommandBar({ onClose }: { onClose: () => void }) {

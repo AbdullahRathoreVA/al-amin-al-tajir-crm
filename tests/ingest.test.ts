@@ -47,6 +47,8 @@ const { familiesWorkbook, admissionsWorkbook, deFormula, exportCounts } =
   await import('../packages/server/src/core/exports.ts');
 const { HELP, HELP_SECTIONS, searchHelp, topicsAsContext } =
   await import('../packages/server/src/core/help.ts');
+const { changeOwnPassword, resetPasswordFor, setUserStatus, ROLE_NAMES,
+        createUser: createUserAuth } = await import('../packages/server/src/core/auth.ts');
 const { addChild, addGuardian, updateChild, updateGuardian, insertFamily,
         ageBandFor, ageLabel, monthsBetween } =
   await import('../packages/server/src/core/people.ts');
@@ -2669,5 +2671,83 @@ describe('the built-in guide', () => {
     for (const gap of ['instagram', 'billing', 'incident', 'staff']) {
       assert.ok(text.includes(gap), `the "not built" topic should mention ${gap}`);
     }
+  });
+});
+
+
+// -------------------------------------------------------- accounts & Lillio
+
+describe('managing your own account', () => {
+  test('a Lillio export maps its columns without anybody doing it by hand', () => {
+    // The real header names from Lillio's Child Profile Report. If this breaks,
+    // somebody has to map twelve columns by hand every time they migrate.
+    const headers = [
+      'Student First Name', 'Student Last Name', 'Student Date of Birth',
+      'Classroom Name', 'Primary Contact', 'Primary Contact Email',
+      'Primary Contact Phone', 'Enrollment Start Date', 'Student Status',
+    ];
+    const m = guessMapping(headers);
+    assert.equal(m.childFirstName, 0);
+    assert.equal(m.childLastName, 1);
+    assert.equal(m.childDob, 2);
+    assert.equal(m.program, 3);
+    assert.equal(m.guardianName, 4);
+    assert.equal(m.guardianEmail, 5);
+    assert.equal(m.guardianPhone, 6);
+    assert.equal(m.desiredStart, 7);
+    assert.equal(m.status, 8);
+  });
+
+  test('changing your own password needs the current one', () => {
+    const u = createUserAuth('pw-test@example.invalid', 'Pw Test', 'director', 'first-password-here');
+    assert.throws(() => changeOwnPassword(u.id, 'wrong-one-entirely', 'second-password-here'),
+      /not your current password/);
+    // An unlocked screen must not be a permanent account takeover.
+    assert.ok(login('pw-test@example.invalid', 'first-password-here'), 'password should be unchanged');
+  });
+
+  test('a new password has to be long enough, and actually new', () => {
+    const u = createUserAuth('pw2@example.invalid', 'Pw Two', 'director', 'first-password-here');
+    assert.throws(() => changeOwnPassword(u.id, 'first-password-here', 'short'), /at least 12/);
+    assert.throws(() => changeOwnPassword(u.id, 'first-password-here', 'first-password-here'),
+      /already have/);
+  });
+
+  test('changing it works, and signs the other devices out', () => {
+    const u = createUserAuth('pw3@example.invalid', 'Pw Three', 'director', 'first-password-here');
+    const a = login('pw3@example.invalid', 'first-password-here');
+    const b = login('pw3@example.invalid', 'first-password-here');
+    assert.ok(a && b);
+
+    const r = changeOwnPassword(u.id, 'first-password-here', 'second-password-here', a.token);
+    assert.equal(r.signedOut, 1, 'the other device should be signed out, this one kept');
+    assert.ok(userForToken(a.token), 'signing somebody out of the screen they are using is hostile');
+    assert.equal(userForToken(b.token), null);
+    assert.ok(login('pw3@example.invalid', 'second-password-here'));
+    assert.equal(login('pw3@example.invalid', 'first-password-here'), null);
+  });
+
+  test("a manager's reset ends every session of that account", () => {
+    const u = createUserAuth('pw4@example.invalid', 'Pw Four', 'educator', 'first-password-here');
+    const s = login('pw4@example.invalid', 'first-password-here');
+    assert.ok(s);
+    resetPasswordFor(u.id, 'manager-set-this-one');
+    assert.equal(userForToken(s.token), null, 'a forgotten password means the old sessions go');
+    assert.ok(login('pw4@example.invalid', 'manager-set-this-one'));
+  });
+
+  test('suspending somebody signs them out immediately', () => {
+    const u = createUserAuth('pw5@example.invalid', 'Pw Five', 'educator', 'first-password-here');
+    const s = login('pw5@example.invalid', 'first-password-here');
+    assert.ok(s);
+    setUserStatus(u.id, 'suspended');
+    assert.equal(userForToken(s.token), null,
+      'suspending does nothing until the browser closes, otherwise');
+    assert.equal(login('pw5@example.invalid', 'first-password-here'), null);
+  });
+
+  test('the role list is read from the capability map, not typed out twice', () => {
+    assert.deepEqual([...ROLE_NAMES].sort(),
+      ['accounting', 'admissions', 'director', 'educator', 'owner', 'readonly']);
   });
 });
