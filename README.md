@@ -87,6 +87,27 @@ Delete every `@demo.local` account before this holds real data.
 Phase 1 and the registration path of Phase 2. Everything listed below works and
 has tests behind it.
 
+- **Adding and editing people by hand** — a family, a guardian, a child, and
+  corrections to any of them. The manual path and the website path write
+  through the same helpers in `core/people.ts`, so there is one definition of
+  "the same guardian". The difference is trust: an inbound form may only fill a
+  gap, a person may overwrite. Duplicates are caught *before* the write, with
+  the candidates shown, rather than raised as a cleanup task afterwards.
+- **Reading a real .xlsx** — the import takes an Excel workbook directly, every
+  tab, with dates coming back as dates rather than the five-digit numbers Excel
+  actually stores. Written on `node:zlib` alone, mirroring the writer.
+- **Children moving up as they grow** — programs carry age bounds in months, so
+  the CRM can answer "who has outgrown their room?". Age bands are a fact and
+  are corrected nightly; a room is a decision and is only ever *suggested*, with
+  the room that fits, the free places and the reason.
+- **Colourful exports** — families/children/guardians and admissions as real
+  workbooks: frozen headers, filters, formatted dates and money, totals that
+  add up. Dates of birth are dropped, not blanked, for roles that cannot export
+  them. Every text cell is escaped so a name beginning `=` cannot execute.
+- **A Help tab** — 29 topics covering every screen, written for somebody who has
+  never used a CRM, plus a question box. Search is deterministic and works with
+  AI off; with a provider configured the AI answers *only* from those topics and
+  says so. The content is one source, shared by the screen and the AI.
 - **Families, guardians, children, leads, tours, registrations, waitlist, tasks,
   notes** — full data model, with siblings and multiple guardians per family.
 - **Website registration intake** — a parent submits on the public site and the
@@ -157,11 +178,19 @@ honest gap. The `/system` page lists this in the app too.
 | Natural-language search. The AI layer itself — family summaries and the daily briefing — **is built**, and is off unless a provider is configured | 4 |
 | Documents, incidents, staff module | 6 |
 | Email **sending is built but needs credentials**; calendar, billing | 7 |
+| Meta: Facebook, Instagram, WhatsApp. **Not a code gap** — it needs Business verification and App Review on the owner's account, which is an approval process | — |
 | Team sync between devices | 9 |
 | Voice agents | 10 |
 
 The event contract already accepts the shape voice agents will send. Nothing
 emits it, and no telephony code exists.
+
+The in-app **Help** tab carries the same list in plain language, so the person
+running the daycare can check what is missing rather than hunt for it. That tab
+is the only support channel they have: **any change to a screen, a permission or
+a limitation updates the matching topic in `core/help.ts` in the same commit.**
+Tests enforce the structural half of that — broken cross-references, empty
+sections, and twelve real questions mapped to the topic that must answer them.
 
 ---
 
@@ -251,7 +280,7 @@ and it is a deployment change rather than a code change. See
 ## Testing
 
 ```bash
-npm test          # 145 tests
+npm test          # 196 tests
 npm run typecheck
 ```
 

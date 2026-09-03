@@ -140,19 +140,33 @@ export function System() {
             out buttons that imply it nearly does. Keep this honest: an item
             stays here until it actually works. (spec 218) */}
         <ul className="flex flex-col gap-1.5 text-[13px]" style={{ color: 'var(--text-muted)' }}>
-          <li>Google Sheets two-way sync. The outbound queue above already records what would be sent.</li>
-          <li>Sending email or SMS to a parent. The CRM drafts; a person sends.</li>
-          <li>Documents, incidents, staff records.</li>
-          <li>Billing and payments.</li>
           <li>
-            Posting to Facebook or Instagram. This is not a code gap: it needs Meta Business
-            verification and App Review, which is an approval process rather than a build.
+            Reading Google Sheets back in. Sending out is built and waiting only on the Google
+            account details; the queue above already records what would be sent.
           </li>
+          <li>
+            SMS to a parent. Email sending is built and waiting only on an account &mdash; and
+            either way the CRM drafts and a person sends.
+          </li>
+          <li>Documents, incidents and staff records. No file store, no incident log, no certificate expiry.</li>
+          <li>Billing and payments. The logbook records what you spend; it does not bill parents.</li>
+          <li>
+            Posting to Facebook or Instagram, and WhatsApp. This is not a code gap: it needs Meta
+            Business verification and App Review, which is an approval process rather than a build.
+          </li>
+          <li>
+            Asking questions in plain language across your records &mdash; &ldquo;show me everyone
+            who toured but did not register&rdquo;. Search and family summaries work; this does not.
+          </li>
+          <li>Sharing between devices. One computer holds the database at a time.</li>
           <li>Voice agents. The event contract accepts their shape already; nothing emits it.</li>
         </ul>
         <p className="mt-3 text-[11px]" style={{ color: 'var(--text-faint)' }}>
-          Spreadsheet import, message drafting, registration completeness, automations, backups and
-          the AI layer are built and in use. AI is off unless a provider is configured.
+          Built and in use: adding families and children by hand, importing an Excel or CSV list,
+          the daily register with rooms and ratios, children moving up as they grow, message
+          drafting, registration completeness, automations, backups, Excel exports, the logbook,
+          and the AI layer. AI is off unless a provider is configured. The Help tab explains all
+          of it.
         </p>
       </Panel>
     </div>
