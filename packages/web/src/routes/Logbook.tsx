@@ -13,6 +13,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, ApiError } from '../lib/api.ts';
 import { useApi } from '../lib/hooks.ts';
+
+/** The browser's local date, which is the one a person means when they
+ *  say "today". The server only knows UTC. */
+const todayIso = () => {
+  const d = new Date();
+  return new Date(d.getTime() - d.getTimezoneOffset() * 60_000).toISOString().slice(0, 10);
+};
 import {
   Panel, Button, Badge, Stat, Spinner, ErrorNote, Empty, NotMeasured,
 } from '../ui/kit.tsx';
@@ -341,8 +348,13 @@ export function Logbook() {
                   {gap.question}
                 </label>
                 <div className="mt-2 flex flex-wrap gap-2">
+                  {/* A date question gets a calendar, not a box you have to
+                      type 2026-09-04 into correctly. Everything else stays a
+                      plain field, because "what was it?" has no picker. */}
                   <input
                     id="log-answer" ref={answerRef} value={answer}
+                    type={gap.field === 'happenedOn' ? 'date' : 'text'}
+                    max={gap.field === 'happenedOn' ? todayIso() : undefined}
                     onChange={(e) => setAnswer(e.target.value)}
                     onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); answerGap(); } }}
                     className={`${field} flex-1 sm:max-w-xs`} style={fieldStyle}
@@ -553,8 +565,9 @@ function EntryRow(
   return (
     <div className="flex flex-col gap-2 px-4 py-3" style={{ background: 'var(--surface-sunken)' }}>
       <div className="flex flex-wrap gap-2">
-        <input aria-label="Day" value={day} onChange={(e) => setDay(e.target.value)}
-               className={`${field} w-32`} style={fieldStyle} />
+        <input aria-label="Day" type="date" value={day} max={todayIso()}
+               onChange={(e) => setDay(e.target.value)}
+               className={`${field} w-40`} style={fieldStyle} />
         <input aria-label="What" value={summary} onChange={(e) => setSummary(e.target.value)}
                className={`${field} min-w-48 flex-1`} style={fieldStyle} autoFocus />
         <input aria-label="Where" value={vendor} onChange={(e) => setVendor(e.target.value)}

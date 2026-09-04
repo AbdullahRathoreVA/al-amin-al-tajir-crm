@@ -304,6 +304,7 @@ export const HELP: HelpTopic[] = [
       'It shows every child, not only the ones with a problem, because "everyone is fine" is not believable unless the children who are fine are on the screen too.',
       'Each child gets one of five verdicts: in the right room, should move, needs a room, no room for this age, or no birthday recorded. The filter at the top right narrows it to one of those.',
       'Where a child should move, the button puts them in that room in one click. Nothing moves on its own — that depends on space, ratios, the educator they have settled with, and their parents.',
+      'If you press the wrong button, an Undo appears at the top of the screen and puts the child straight back. It works for about half an hour after the move; after that, move them back deliberately so the room’s numbers are in front of you. The undo is recorded like any other move, because “who moved this child, and when” has to stay answerable.',
     ],
     steps: [
       'Open Ages & Rooms from the left menu.',
@@ -552,6 +553,7 @@ export const HELP: HelpTopic[] = [
       'Type something like "spent 42.50 at Costco on snacks yesterday" and the amount, the date, the supplier and the category are read out of it. If the sentence did not say something, it asks you once rather than guessing.',
       'What you actually typed is kept next to what was understood from it, so a bad reading can be corrected against your original words.',
       'You can speak instead of typing, using your browser\'s own speech recognition. There is no charge for it and the microphone only appears where it works.',
+      'When it asks you for a date, you get a calendar to pick from rather than a box to type 2026-09-04 into correctly.',
       'Entries can be corrected, and removed. A removed entry leaves the lists and the totals but the record of it stays, so a total can never quietly stop matching the receipts. You can put it back.',
     ],
     steps: [

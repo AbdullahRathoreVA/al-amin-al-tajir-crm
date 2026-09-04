@@ -64,6 +64,16 @@ export function parseMoney(text: string): number | null {
   const bareDecimal = /(?:^|\s)([0-9][0-9,]*)[.,]([0-9]{2})(?=\s|$)/.exec(text);
   if (bareDecimal) return toCents(bareDecimal[1]!, bareDecimal[2]);
 
+  // A bare number straight after a spending verb IS money: "spent 30 on
+  // snacks", "paid 45 for wipes". Those lost their amount entirely and became
+  // entries with no cost in them.
+  //
+  // Only immediately after the verb, and deliberately not after "bought",
+  // because "bought 3 boxes of gloves" is a count and reading it as $3 would
+  // be worse than reading nothing.
+  const afterVerb = /\b(?:spent|spend|paid|pay|cost)\s+\$?([0-9][0-9,]*)(?:[.,]([0-9]{1,2}))?\b/i.exec(text);
+  if (afterVerb) return toCents(afterVerb[1]!, afterVerb[2]);
+
   // Written out: "eighty dollars", "twenty five dollars", "a hundred bucks".
   //
   // Only with a currency word after it, for the same reason a bare "2" is not
@@ -238,6 +248,10 @@ export function parseKind(text: string, hasAmount = false): LogKind {
   if (/\b(bought|buy|purchas|paid|spent|spend|order(?:ed)?|invoice|receipt|topped up|filled up|refill(?:ed)?)\b/i.test(text)) return 'purchase';
   if (/\b(ran out|running low|need more|restock|out of|low on)\b/i.test(text)) return 'supply';
   if (/\b(fixed|cleaned|repaired|done|finished|completed|sorted|tidied)\b/i.test(text)) return 'task';
+  // Fuel is always bought, even when the sentence never says so. "Put fuel in
+  // the car" carries no verb this recognises and often no amount at all, and
+  // was filed as a note that then sat outside every total.
+  if (/\b(fuel|petrol|diesel|gasoline)\b/i.test(text)) return 'purchase';
   // "put fuel in the car, $60" — money named, no verb this knows.
   if (hasAmount) return 'purchase';
   return 'note';

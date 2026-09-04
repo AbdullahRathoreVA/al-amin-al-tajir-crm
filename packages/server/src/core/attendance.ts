@@ -619,3 +619,64 @@ export function staffByClassroom(): Record<string, Record<string, unknown>[]> {
   }
   return out;
 }
+
+/**
+ * Put a child back where they were before the last move.
+ *
+ * The append-only event log already records the room a child was in before
+ * every placement, so undo is a read of history rather than a second column
+ * tracking "previous room" that could drift out of step with it.
+ *
+ * It is a new placement, not an erasure: the log keeps both the move and the
+ * undo. A safety record that can be rewritten is worth very little, and "who
+ * moved this child, and when" has to stay answerable.
+ *
+ * Only the most recent move, and only for a short window. Undoing something
+ * from three weeks ago is not an undo, it is a move that should be made
+ * deliberately with the room's current numbers in front of you.
+ */
+export const UNDO_WINDOW_MINUTES = 30;
+
+export function undoLastPlacement(
+  childId: string, user: User, actor: Actor, now = Date.now(),
+): { undone: true; room: string | null } | { undone: false; why: string } {
+  const before = plain(one<Record<string, unknown>>(
+    'SELECT id, first_name, classroom_id, status FROM children WHERE id = ?', childId));
+  if (!before) throw new AttendanceError('No such child');
+  if (!mayTouchClassroom(user, before.classroom_id as string | null)) {
+    throw new AttendanceError('That child is not in a room you are assigned to');
+  }
+
+  const last = one<{ before_json: string | null; created_at: string }>(
+    `SELECT before_json, created_at FROM events
+      WHERE entity_type = 'child' AND entity_id = ? AND type = 'placed'
+      ORDER BY seq DESC LIMIT 1`, childId);
+  if (!last) return { undone: false, why: 'That child has not been moved, so there is nothing to undo.' };
+
+  const ageMinutes = (now - Date.parse(last.created_at)) / 60_000;
+  if (!Number.isFinite(ageMinutes) || ageMinutes > UNDO_WINDOW_MINUTES) {
+    return {
+      undone: false,
+      why: `The last move was more than ${UNDO_WINDOW_MINUTES} minutes ago. Move them back deliberately instead, so the room's numbers are in front of you.`,
+    };
+  }
+
+  let previous: Record<string, unknown>;
+  try { previous = JSON.parse(last.before_json ?? '{}') as Record<string, unknown>; }
+  catch { return { undone: false, why: 'The record of that move cannot be read.' }; }
+
+  const priorRoom = (previous.classroom_id ?? null) as string | null;
+  if (priorRoom === (before.classroom_id ?? null)) {
+    return { undone: false, why: 'They are already back where they were.' };
+  }
+
+  const result = assignChild(childId, {
+    classroomId: priorRoom,
+    ...(typeof previous.status === 'string' ? { status: previous.status } : {}),
+  }, actor);
+
+  const roomName = priorRoom
+    ? one<{ name: string }>('SELECT name FROM classrooms WHERE id = ?', priorRoom)?.name ?? null
+    : null;
+  return { undone: true, room: roomName ?? (result.classroom_id ? String(result.classroom_id) : null) };
+}

@@ -48,15 +48,33 @@ export function AgesRooms({ canMove }: { canMove: boolean }) {
   const [filter, setFilter] = useState<Verdict | 'all'>('all');
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // The last move made on this screen, so a mis-click has a way back that does
+  // not involve hunting for the room they came from.
+  const [lastMove, setLastMove] = useState<{ childId: string; name: string; room: string } | null>(null);
+  const [undoNote, setUndoNote] = useState<string | null>(null);
 
   async function place(row: Row) {
     if (!row.shouldBeRoomId) return;
-    setBusy(row.childId); setError(null);
+    setBusy(row.childId); setError(null); setUndoNote(null);
     try {
       await api.patch(`/children/${row.childId}/placement`, { classroomId: row.shouldBeRoomId });
+      setLastMove({ childId: row.childId, name: row.name, room: row.shouldBeRoom ?? 'their new room' });
       res.reload();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not move that child.');
+    } finally { setBusy(null); }
+  }
+
+  async function undo() {
+    if (!lastMove) return;
+    setBusy(lastMove.childId); setError(null); setUndoNote(null);
+    try {
+      const r = await api.post<{ undone: boolean; room?: string | null; why?: string }>(
+        `/children/${lastMove.childId}/placement/undo`, {});
+      if (r.undone) { setLastMove(null); res.reload(); }
+      else setUndoNote(r.why ?? 'That could not be undone.');
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not undo that.');
     } finally { setBusy(null); }
   }
 
@@ -81,6 +99,30 @@ export function AgesRooms({ canMove }: { canMove: boolean }) {
       {res.loading && !d && <Spinner label="Working out where everyone goes" />}
       {res.error && <ErrorNote error={res.error} retry={res.reload} />}
       {error && <ErrorNote error={error} retry={() => setError(null)} />}
+
+      {/* A move is one click, so undoing one should be too. The window is
+          short on purpose: undoing something from last week is not an undo,
+          it is a move that deserves the room's numbers in front of you. */}
+      {lastMove && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg px-3 py-2"
+             role="status"
+             style={{ background: 'color-mix(in oklab, var(--color-ok-400) 14%, transparent)',
+                      color: 'var(--color-ok-600)' }}>
+          <span className="text-[13px]">
+            {lastMove.name} moved to {lastMove.room}.
+          </span>
+          <span className="flex items-center gap-2">
+            <Button size="sm" disabled={busy === lastMove.childId} onClick={() => void undo()}>
+              {busy === lastMove.childId ? 'Undoing…' : 'Undo'}
+            </Button>
+            <button type="button" onClick={() => { setLastMove(null); setUndoNote(null); }}
+                    className="text-[12px] underline" style={{ color: 'inherit' }}>
+              Dismiss
+            </button>
+          </span>
+        </div>
+      )}
+      {undoNote && <ErrorNote error={undoNote} retry={() => setUndoNote(null)} />}
 
       {d && (
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">

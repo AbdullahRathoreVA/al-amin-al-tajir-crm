@@ -49,6 +49,7 @@ import {
   roomStandings, daySummary, logRegisterRead, today, isDay, AttendanceError,
   createClassroom, updateClassroom, assignChild, unplacedChildren,
   setRatio, clearRatio, programsWithRatios, assignableStaff, staffByClassroom,
+  undoLastPlacement,
   type AttendanceStatus,
 } from './core/attendance.ts';
 import { ingest } from './ingest/pipeline.ts';
@@ -1880,6 +1881,17 @@ router.patch('/api/v1/children/:id/placement', (c) => {
   c.require('child:write');
   const b = requireBody<{ classroomId?: string | null; status?: string }>(c);
   return attendance(() => assignChild(c.params.id!, b, actorOf(c)));
+});
+
+/**
+ * Put a child back where they were, for the click that was a mistake.
+ *
+ * A new placement rather than an erasure: the log keeps both the move and the
+ * undo, because "who moved this child, and when" has to stay answerable.
+ */
+router.post('/api/v1/children/:id/placement/undo', (c) => {
+  c.require('child:write');
+  return attendance(() => undoLastPlacement(c.params.id!, c.user!, actorOf(c)));
 });
 
 router.patch('/api/v1/programs/:id/ratio', (c) => {

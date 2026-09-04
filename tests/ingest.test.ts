@@ -63,7 +63,8 @@ const { factsForFamily, ruleSummary, summariseFamily, dailyBrief, aiStatus } =
   await import('../packages/server/src/core/ai.ts');
 const { visibleClassroomIds, register, mark, checkOut, assignStaff, unassignStaff,
         roomStandings, createClassroom, updateClassroom, assignChild, unplacedChildren,
-        setRatio, clearRatio, assignableStaff } = await import('../packages/server/src/core/attendance.ts');
+        setRatio, clearRatio, assignableStaff, undoLastPlacement } =
+  await import('../packages/server/src/core/attendance.ts');
 const { timelineFor } = await import('../packages/server/src/core/events.ts');
 const { registerTransport, upsertTarget, targetFor, queue, due, suppressed, runChannel,
         recentRuns: syncRuns, channelStatus, backoffMs, MAX_ATTEMPTS, mappingFor, toRow,
@@ -3314,5 +3315,63 @@ describe('the waiting list', () => {
     assert.ok(standing);
     assert.equal(standing.capacity, 76, 'the licensed number, from the poster');
     assert.equal(typeof standing.waiting, 'number');
+  });
+});
+
+describe('undoing a placement that was a mis-click', () => {
+  const STAFF = { type: 'user' as const, id: null, source: 'manual' };
+  const owner = { id: 'undo-owner', role: 'owner' as const, email: 'u@x', name: 'U',
+                  status: 'active' as const, created_at: '', last_login_at: null };
+
+  test('a child goes back to the room they came from', () => {
+    const pid = one<{ id: string }>("SELECT id FROM programs WHERE slug='comet-stars'")!.id;
+    const from = createClassroom('Undo From', { programId: pid, capacity: 10 }, STAFF);
+    const to = createClassroom('Undo To', { programId: pid, capacity: 10 }, STAFF);
+    const fam = insertFamily('Undo family', 'manual', null, STAFF);
+    const kid = addChild(fam, { firstName: 'Undokid' }, STAFF);
+
+    assignChild(kid, { classroomId: String(from.id), status: 'enrolled' }, STAFF);
+    assignChild(kid, { classroomId: String(to.id) }, STAFF);
+    assert.equal(one<{ classroom_id: string }>(
+      'SELECT classroom_id FROM children WHERE id = ?', kid)?.classroom_id, String(to.id));
+
+    const r = undoLastPlacement(kid, owner, STAFF);
+    assert.equal(r.undone, true);
+    assert.equal(one<{ classroom_id: string }>(
+      'SELECT classroom_id FROM children WHERE id = ?', kid)?.classroom_id, String(from.id));
+  });
+
+  test('the undo is recorded, not hidden', () => {
+    // A safety record that can be rewritten is worth very little. Both the
+    // move and the undo stay in the log.
+    const moves = many<{ summary: string }>(
+      `SELECT e.summary FROM events e
+        JOIN children c ON c.id = e.entity_id
+       WHERE c.first_name = 'Undokid' AND e.type = 'placed'`);
+    assert.ok(moves.length >= 3, 'the original placement, the move, and the undo');
+  });
+
+  test('there is nothing to undo for a child who was never moved', () => {
+    const fam = insertFamily('Never moved family', 'manual', null, STAFF);
+    const kid = addChild(fam, { firstName: 'Nevermoved' }, STAFF);
+    const r = undoLastPlacement(kid, owner, STAFF);
+    assert.equal(r.undone, false);
+    assert.match((r as { why: string }).why, /nothing to undo/i);
+  });
+
+  test('an old move is not undoable, and says why', () => {
+    const pid = one<{ id: string }>("SELECT id FROM programs WHERE slug='nova-stars'")!.id;
+    const room = createClassroom('Undo Old', { programId: pid, capacity: 10 }, STAFF);
+    const fam = insertFamily('Old move family', 'manual', null, STAFF);
+    const kid = addChild(fam, { firstName: 'Oldmove' }, STAFF);
+    assignChild(kid, { classroomId: String(room.id) }, STAFF);
+
+    // The clock is passed in rather than the event being backdated: the event
+    // log is append-only and refuses an UPDATE, which is exactly the guarantee
+    // that makes the log worth having.
+    const threeHoursLater = Date.now() + 3 * 3600_000;
+    const r = undoLastPlacement(kid, owner, STAFF, threeHoursLater);
+    assert.equal(r.undone, false);
+    assert.match((r as { why: string }).why, /more than \d+ minutes ago/);
   });
 });
