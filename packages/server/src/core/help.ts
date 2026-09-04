@@ -303,7 +303,9 @@ export const HELP: HelpTopic[] = [
       'Ages & Rooms is the screen to open when you have just brought a list of children in, or when you want to check nobody has been missed.',
       'It shows every child, not only the ones with a problem, because "everyone is fine" is not believable unless the children who are fine are on the screen too.',
       'Each child gets one of five verdicts: in the right room, should move, needs a room, no room for this age, or no birthday recorded. The filter at the top right narrows it to one of those.',
-      'Where a child should move, the button puts them in that room in one click. Nothing moves on its own — that depends on space, ratios, the educator they have settled with, and their parents.',
+      'Every move asks first. It names the child, the room they are leaving, the room they are going to and how many places are free there — because the mistake worth preventing is pressing the button on the row above the one you meant.',
+      'You can move ANY child to ANY room from the “Move to…” list beside them, not only the ones the age groups have an opinion about. Children move for reasons this screen cannot see: a friend, a key worker, a parent asking.',
+      'Nothing moves on its own — that depends on space, ratios, the educator they have settled with, and their parents.',
       'If you press the wrong button, an Undo appears at the top of the screen and puts the child straight back. It works for about half an hour after the move; after that, move them back deliberately so the room’s numbers are in front of you. The undo is recorded like any other move, because “who moved this child, and when” has to stay answerable.',
     ],
     steps: [

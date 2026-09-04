@@ -1522,6 +1522,15 @@ router.get('/api/v1/placement', (c) => {
   const count = (v: string) => rows.filter((r) => r.verdict === v).length;
   return {
     rows: plainAll(rows as unknown as Record<string, unknown>[]),
+    // Every open room, so any child's room can be changed from this screen and
+    // not only the ones the age ladder has an opinion about. A child moves for
+    // reasons the CRM cannot see — a friend, a key worker, a parent's request.
+    rooms: plainAll(many(
+      `SELECT r.id, r.name, p.name AS program_name, r.capacity,
+              (SELECT COUNT(*) FROM children ch
+                WHERE ch.classroom_id = r.id AND ch.status = 'enrolled') AS enrolled
+         FROM classrooms r LEFT JOIN programs p ON p.id = r.program_id
+        WHERE r.active = 1 ORDER BY p.sort_order, r.name`)),
     summary: {
       total: rows.length,
       correct: count('correct'),

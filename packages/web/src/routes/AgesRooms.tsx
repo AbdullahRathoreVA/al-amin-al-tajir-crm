@@ -15,7 +15,9 @@ import { useState } from 'react';
 import { api, ApiError } from '../lib/api.ts';
 import { useApi } from '../lib/hooks.ts';
 import { Link } from '../lib/router.tsx';
-import { Panel, Badge, Button, Empty, Spinner, ErrorNote, Stat } from '../ui/kit.tsx';
+import {
+  Panel, Badge, Button, Empty, Spinner, ErrorNote, Stat, Modal, SelectInput, NotMeasured,
+} from '../ui/kit.tsx';
 
 type Verdict = 'correct' | 'move' | 'unplaced' | 'no-room-for-age' | 'no-birthday';
 
@@ -27,8 +29,13 @@ interface Row {
   shouldBeRoomId: string | null; shouldBeRoom: string | null;
   verdict: Verdict; reason: string;
 }
+interface RoomOption {
+  id: string; name: string; program_name: string | null;
+  capacity: number | null; enrolled: number;
+}
 interface Plan {
   rows: Row[];
+  rooms: RoomOption[];
   summary: { total: number; correct: number; move: number; unplaced: number;
              noRoomForAge: number; noBirthday: number };
 }
@@ -52,13 +59,22 @@ export function AgesRooms({ canMove }: { canMove: boolean }) {
   // not involve hunting for the room they came from.
   const [lastMove, setLastMove] = useState<{ childId: string; name: string; room: string } | null>(null);
   const [undoNote, setUndoNote] = useState<string | null>(null);
+  // Nothing moves until this is answered.
+  const [pending, setPending] = useState<{ row: Row; roomId: string; roomName: string } | null>(null);
 
-  async function place(row: Row) {
-    if (!row.shouldBeRoomId) return;
+  /**
+   * Moving a child is confirmed, always.
+   *
+   * It used to happen on one click, and it moved the wrong child twice in an
+   * afternoon - the rows are one line apart and every button says much the
+   * same thing. An undo afterwards is not a substitute for being asked first.
+   */
+  async function confirmMove(row: Row, roomId: string, roomName: string) {
     setBusy(row.childId); setError(null); setUndoNote(null);
     try {
-      await api.patch(`/children/${row.childId}/placement`, { classroomId: row.shouldBeRoomId });
-      setLastMove({ childId: row.childId, name: row.name, room: row.shouldBeRoom ?? 'their new room' });
+      await api.patch(`/children/${row.childId}/placement`, { classroomId: roomId });
+      setLastMove({ childId: row.childId, name: row.name, room: roomName });
+      setPending(null);
       res.reload();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not move that child.');
@@ -195,11 +211,39 @@ export function AgesRooms({ canMove }: { canMove: boolean }) {
                       )}
                     </span>
 
-                    {canMove && r.shouldBeRoomId && r.verdict !== 'correct' && (
-                      <Button size="sm" variant="primary" disabled={busy === r.childId}
-                              onClick={() => void place(r)}>
-                        {busy === r.childId ? 'Moving…' : `Put in ${r.shouldBeRoom}`}
-                      </Button>
+                    {canMove && (
+                      <span className="flex flex-wrap items-center gap-2">
+                        {r.shouldBeRoomId && r.verdict !== 'correct' && (
+                          <Button size="sm" variant="primary" disabled={busy === r.childId}
+                                  onClick={() => setPending({
+                                    row: r, roomId: r.shouldBeRoomId!,
+                                    roomName: r.shouldBeRoom ?? 'that room',
+                                  })}>
+                            Put in {r.shouldBeRoom}
+                          </Button>
+                        )}
+                        {/* Any child, any room. A child moves for reasons this
+                            screen cannot see - a friend, a key worker, a parent
+                            asking - and refusing those means somebody keeps a
+                            second list somewhere else. */}
+                        <SelectInput
+                          aria-label={`Move ${r.name} to a different room`}
+                          value=""
+                          disabled={busy === r.childId}
+                          onChange={(e) => {
+                            const room = (d?.rooms ?? []).find((x) => x.id === e.target.value);
+                            if (room) setPending({ row: r, roomId: room.id, roomName: room.name });
+                          }}
+                          className="w-auto min-w-40 text-[12px]"
+                        >
+                          <option value="">Move to…</option>
+                          {(d?.rooms ?? [])
+                            .filter((room) => room.id !== r.currentRoomId)
+                            .map((room) => (
+                              <option key={room.id} value={room.id}>{room.name}</option>
+                            ))}
+                        </SelectInput>
+                      </span>
                     )}
                   </li>
                 );
@@ -207,6 +251,17 @@ export function AgesRooms({ canMove }: { canMove: boolean }) {
             </ul>
           )}
         </Panel>
+      )}
+
+      {pending && (
+        <MoveDialog
+          row={pending.row}
+          roomName={pending.roomName}
+          room={(d?.rooms ?? []).find((x) => x.id === pending.roomId) ?? null}
+          busy={busy === pending.row.childId}
+          onCancel={() => setPending(null)}
+          onConfirm={() => void confirmMove(pending.row, pending.roomId, pending.roomName)}
+        />
       )}
 
       {d && (d.summary.noBirthday > 0 || d.summary.noRoomForAge > 0) && (
@@ -232,5 +287,58 @@ export function AgesRooms({ canMove }: { canMove: boolean }) {
         </Panel>
       )}
     </div>
+  );
+}
+
+/**
+ * "Move this child?" - the question that was missing.
+ *
+ * It names the child, the room they are leaving and the room they are going
+ * to, because the mistake being prevented is pressing the button on the row
+ * above or below the one you meant. Free places are shown so the decision is
+ * made with the room's numbers in front of you rather than after the fact.
+ */
+function MoveDialog(
+  { row, roomName, room, busy, onCancel, onConfirm }:
+  { row: Row; roomName: string; room: RoomOption | null; busy: boolean;
+    onCancel: () => void; onConfirm: () => void },
+) {
+  const free = room?.capacity == null ? null : Math.max(0, room.capacity - room.enrolled);
+  return (
+    <Modal
+      title={`Move ${row.name}?`}
+      description="Nothing has changed yet."
+      onClose={onCancel}
+      footer={
+        <>
+          <Button onClick={onCancel}>Cancel</Button>
+          <Button variant="primary" disabled={busy} onClick={onConfirm}>
+            {busy ? 'Moving…' : `Yes, move to ${roomName}`}
+          </Button>
+        </>
+      }
+    >
+      <div className="flex flex-col gap-3 text-[13px]">
+        <p className="flex flex-wrap items-center gap-2">
+          <Badge tone="neutral">{row.currentRoom ?? 'no room'}</Badge>
+          <span aria-hidden style={{ color: 'var(--text-faint)' }}>&rarr;</span>
+          <Badge tone="ok">{roomName}</Badge>
+        </p>
+        <p style={{ color: 'var(--text-muted)' }}>
+          {row.name} is {row.ageLabel ?? 'of unknown age'}
+          {row.familyName ? `, from the ${row.familyName}` : ''}.
+        </p>
+        <p style={{ color: 'var(--text-muted)' }}>
+          {free === null
+            ? <>Nobody has set a capacity for {roomName}, so free places are{' '}
+                <NotMeasured why="No capacity recorded for that room or its age group" />.</>
+            : free === 0
+              ? <strong style={{ color: 'var(--color-warn-600)' }}>
+                  {roomName} is already full. You can still move them, but check the ratio.
+                </strong>
+              : <>{roomName} has {free} place{free === 1 ? '' : 's'} free.</>}
+        </p>
+      </div>
+    </Modal>
   );
 }
